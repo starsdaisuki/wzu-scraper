@@ -1,13 +1,19 @@
 """WZU educational system scraper with session management."""
 
 import json
-import re
-import time
+import logging
 from pathlib import Path
 
 import httpx
 
-from .crypto import aes_encrypt, generate_aes_key
+from .auth import build_login_data, extract_login_error, is_jwxt_url, parse_login_page
+from .jwxt_api import (
+    build_grades_payload,
+    build_schedule_payload,
+    parse_grades_json,
+    parse_schedule_json,
+    parse_student_info_html,
+)
 
 # CAS login base URL (direct, not through WebVPN - jwxt uses source.wzu.edu.cn)
 CAS_BASE = "https://source.wzu.edu.cn"
@@ -24,6 +30,7 @@ HEADERS = {
 }
 
 COOKIE_FILE = Path(__file__).parent.parent / ".cookies.json"
+logger = logging.getLogger(__name__)
 
 
 class WZUClient:
@@ -68,52 +75,31 @@ class WZUClient:
         service_url = f"{JWXT_BASE}/sso/zfiotlogin"
         login_url = f"{CAS_BASE}/login?service={service_url}"
 
-        # Step 1: GET the login page to extract execution token and croypto key
-        print("[*] Fetching CAS login page...")
+        logger.info("Fetching CAS login page")
         resp = self._client.get(login_url)
         resp.raise_for_status()
-        html = resp.text
 
-        # Check if cookies already got us logged in (CAS auto-redirected)
-        if "jwglxt" in str(resp.url):
-            print("[+] Already logged in via saved session!")
+        if is_jwxt_url(str(resp.url)):
+            logger.info("Reused existing CAS session")
             self._logged_in = True
             return True
 
-        # Extract execution token (Spring WebFlow)
-        exec_match = re.search(r'id="login-page-flowkey"[^>]*>([^<]+)<', html)
-        if not exec_match:
-            print("[!] Failed to find execution token in login page")
+        login_page = parse_login_page(resp.text)
+        if login_page is None:
+            logger.warning("Failed to parse execution token from login page")
             return False
-        execution = exec_match.group(1).strip()
 
-        # Extract the server's croypto key (used to verify we can encrypt)
-        croypto_match = re.search(r'id="login-croypto"[^>]*>([^<]+)<', html)
-        server_croypto = croypto_match.group(1).strip() if croypto_match else None
+        logger.info(
+            "Parsed CAS login page fields",
+            extra={
+                "execution_length": len(login_page.execution),
+                "has_server_croypto": bool(login_page.server_croypto),
+            },
+        )
 
-        print(f"[*] Got execution token ({len(execution)} chars)")
-        print(f"[*] Server croypto: {server_croypto}")
+        login_data = build_login_data(username, password, login_page.execution)
+        logger.info("Submitting CAS login request")
 
-        # Step 2: Generate our AES key and encrypt the password
-        aes_key = generate_aes_key()
-        import base64
-        croypto_b64 = base64.b64encode(aes_key).decode("ascii")
-        encrypted_password = aes_encrypt(aes_key, password)
-
-        print(f"[*] Encrypted password, logging in as {username}...")
-
-        # Step 3: POST login
-        login_data = {
-            "username": username,
-            "type": "UsernamePassword",
-            "_eventId": "submit",
-            "geolocation": "",
-            "execution": execution,
-            "croypto": croypto_b64,
-            "password": encrypted_password,
-        }
-
-        # Don't follow redirects for the POST - we need to handle the chain manually
         post_resp = self._client.post(
             f"{CAS_BASE}/login",
             data=login_data,
@@ -125,26 +111,22 @@ class WZUClient:
             },
         )
 
-        # Check if we ended up at the educational system
         final_url = str(post_resp.url)
-        if "jwglxt" in final_url or "index" in final_url:
-            print(f"[+] Login successful! Final URL: {final_url}")
+        if is_jwxt_url(final_url):
+            logger.info("CAS login succeeded", extra={"final_url": final_url})
             self._logged_in = True
             self._save_cookies()
             return True
 
-        # Check for login failure (still on login page)
         if "/login" in final_url:
-            # Try to extract error message
-            err_match = re.search(r'class="[^"]*error[^"]*"[^>]*>([^<]+)<', post_resp.text)
-            if err_match:
-                print(f"[!] Login failed: {err_match.group(1).strip()}")
+            error_message = extract_login_error(post_resp.text)
+            if error_message:
+                logger.warning("CAS login failed", extra={"error": error_message})
             else:
-                print(f"[!] Login failed, redirected back to: {final_url}")
+                logger.warning("CAS login failed", extra={"final_url": final_url})
             return False
 
-        print(f"[*] Ended at: {final_url}")
-        # Might still be OK if we got cookies
+        logger.info("CAS login ended at unexpected URL", extra={"final_url": final_url})
         self._logged_in = True
         self._save_cookies()
         return True
@@ -172,14 +154,8 @@ class WZUClient:
         if resp.status_code != 200:
             return None
 
-        html = resp.text
-        info = {}
-        # Extract student name
-        name_match = re.search(r'用户名[：:]\s*([^<\s]+)', html)
-        if name_match:
-            info["name"] = name_match.group(1)
-
-        return info if info else {"raw_length": len(html), "url": str(resp.url)}
+        info = parse_student_info_html(resp.text)
+        return info if info else {"raw_length": len(resp.text), "url": str(resp.url)}
 
     def get_course_schedule(self, school_year: str = "2025-2026", semester: str = "2") -> list[dict]:
         """Fetch course schedule (课程表).
@@ -188,41 +164,24 @@ class WZUClient:
             school_year: e.g. "2025-2026"
             semester: "1" for fall, "2" for spring, "3" for summer
         """
-        # The 正方 system uses xnm (学年) and xqm (学期) parameters
-        # xqm encoding: 3=fall(第1学期), 12=spring(第2学期), 16=summer(第3学期)
-        xqm_map = {"1": "3", "2": "12", "3": "16"}
-        xnm = school_year.split("-")[0]  # Use the start year
-
         resp = self._client.post(
             f"{JWXT_BASE}/jwglxt/kbcx/xskbcx_cxXsgrkb.html",
             params={"gnmkdm": "N2151"},
-            data={"xnm": xnm, "xqm": xqm_map.get(semester, "12")},
+            data=build_schedule_payload(school_year, semester),
             headers={"X-Requested-With": "XMLHttpRequest"},
         )
 
         if resp.status_code != 200:
-            print(f"[!] Failed to fetch schedule: {resp.status_code}")
+            logger.warning("Failed to fetch schedule", extra={"status_code": resp.status_code})
             return []
 
         try:
             data = resp.json()
         except json.JSONDecodeError:
-            print(f"[!] Response is not JSON (might need re-login)")
+            logger.warning("Schedule response was not JSON")
             return []
 
-        courses = []
-        for item in data.get("kbList", []):
-            courses.append({
-                "name": item.get("kcmc", ""),          # 课程名称
-                "teacher": item.get("xm", ""),          # 教师
-                "location": item.get("cdmc", ""),       # 教室
-                "weekday": item.get("xqjmc", ""),       # 星期几
-                "periods": item.get("jcor", ""),        # 第几节
-                "weeks": item.get("zcd", ""),           # 周次
-                "credit": item.get("xf", ""),           # 学分
-            })
-
-        return courses
+        return parse_schedule_json(data)
 
     def get_grades(self, school_year: str = "2025-2026", semester: str = "2") -> list[dict]:
         """Fetch grades (成绩).
@@ -231,43 +190,24 @@ class WZUClient:
             school_year: e.g. "2025-2026"
             semester: "1" for fall, "2" for spring. Use "" for all.
         """
-        xqm_map = {"1": "3", "2": "12", "3": "16", "": ""}
-        xnm = school_year.split("-")[0] if school_year else ""
-
         resp = self._client.post(
             f"{JWXT_BASE}/jwglxt/cjcx/cjcx_cxDgXscj.html",
             params={"doType": "query", "gnmkdm": "N305005"},
-            data={
-                "xnm": xnm,
-                "xqm": xqm_map.get(semester, "12"),
-                "queryModel.showCount": "100",
-                "queryModel.currentPage": "1",
-            },
+            data=build_grades_payload(school_year, semester),
             headers={"X-Requested-With": "XMLHttpRequest"},
         )
 
         if resp.status_code != 200:
-            print(f"[!] Failed to fetch grades: {resp.status_code}")
+            logger.warning("Failed to fetch grades", extra={"status_code": resp.status_code})
             return []
 
         try:
             data = resp.json()
         except json.JSONDecodeError:
-            print(f"[!] Response is not JSON")
+            logger.warning("Grades response was not JSON")
             return []
 
-        grades = []
-        for item in data.get("items", []):
-            grades.append({
-                "name": item.get("kcmc", ""),       # 课程名称
-                "grade": item.get("cj", ""),         # 成绩
-                "gpa_point": item.get("jd", ""),     # 绩点
-                "credit": item.get("xf", ""),        # 学分
-                "category": item.get("kcxzmc", ""),  # 课程性质
-                "type": item.get("kcbj", ""),        # 课程标记
-            })
-
-        return grades
+        return parse_grades_json(data)
 
     def close(self):
         self._client.close()

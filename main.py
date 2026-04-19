@@ -49,7 +49,7 @@ def _show_article_list(articles, label=""):
         site_tag = f"[{SITES[art.site].name}]" if art.site in SITES else ""
         print(f"  {i:>3}. [{art.date}] {site_tag} {art.title}")
 
-    print(f"\n  Enter number to read, or press Enter to go back")
+    print("\n  Enter number to read, or press Enter to go back")
     while True:
         sel = input("  > ").strip()
         if not sel:

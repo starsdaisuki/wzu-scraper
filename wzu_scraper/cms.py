@@ -4,12 +4,15 @@ Supports any WZU website built on the same CMS platform.
 """
 
 import json
+import logging
 import re
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import httpx
+
+from .cms_parsers import extract_article_content, parse_list_page
 
 HEADERS = {
     "User-Agent": (
@@ -20,6 +23,7 @@ HEADERS = {
 }
 
 DB_DIR = Path(__file__).parent.parent / "data"
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -165,87 +169,24 @@ class CMSScraper:
         )
 
     def _parse_list_page(self, html: str, category_name: str, site: SiteConfig) -> list[Article]:
-        """Extract articles from a list page.
-
-        Supports two CMS layouts:
-        - JWC style: <span class="w"><a>TITLE</a></span><span class="time">DATE</span>
-        - SLXY style: <a title="TITLE">TEXT</a><samp>DATE</samp>
-        """
-        articles = []
-        # Try JWC style first
-        items = re.findall(
-            r'<li[^>]*>\s*<span[^>]*class="w"[^>]*>\s*<a[^>]*href="(?:\.\./)*info/(\d+)/(\d+)\.htm"[^>]*>(.*?)</a>\s*</span>\s*<span[^>]*class="time"[^>]*>(.*?)</span>',
-            html,
-            re.DOTALL,
-        )
-        if not items:
-            # Style B (SLXY): <a title="TITLE">...</a><samp>DATE</samp>
-            items = re.findall(
-                r'<li[^>]*>\s*<a[^>]*href="(?:\.\./)*info/(\d+)/(\d+)\.htm"[^>]*title="([^"]*)"[^>]*>.*?</a>\s*<samp>(.*?)</samp>',
-                html,
-                re.DOTALL,
-            )
-        if not items:
-            # Style C (SHXY): <a title="TITLE">...<i>DD</i>/ YYYY-MM...</a>
-            raw = re.findall(
-                r'<a[^>]*href="(?:\.\./)*info/(\d+)/(\d+)\.htm"[^>]*title="([^"]*)"[^>]*>.*?<i>(\d+)</i>/\s*(\d{4}-\d{2})',
-                html,
-                re.DOTALL,
-            )
-            items = [(c, a, t, f"{ym}-{d.zfill(2)}") for c, a, t, d, ym in raw]
-        if not items:
-            # Style D (AI/CACE): <a>TITLE</a><span class="time">DATE</span>
-            items = re.findall(
-                r'<li[^>]*>\s*<a[^>]*href="(?:\.\./)*info/(\d+)/(\d+)\.htm"[^>]*>([^<]+)</a>\s*<span[^>]*class="time"[^>]*>(.*?)</span>',
-                html,
-                re.DOTALL,
-            )
-        if not items:
-            # Style E (CHEM): <a><b>TITLE</b><span>DATE</span></a>
-            items = re.findall(
-                r'<a[^>]*href="(?:\.\./)*info/(\d+)/(\d+)\.htm"[^>]*>\s*<b[^>]*>(.*?)</b>\s*<span[^>]*>([\d-]+)</span>',
-                html,
-                re.DOTALL,
-            )
-        if not items:
-            # Style F (JDXY): <a><div class="main_list_time">DATE</div><div class="main_list_tit">TITLE</div></a>
-            raw = re.findall(
-                r'<a[^>]*href="(?:\.\./)*info/(\d+)/(\d+)\.htm"[^>]*>\s*<div[^>]*class="main_list_time"[^>]*>\s*([\d-]+)\s*</div>\s*<div[^>]*class="main_list_tit"[^>]*>\s*(.*?)\s*</div>',
-                html,
-                re.DOTALL,
-            )
-            items = [(c, a, t.strip(), d.strip()) for c, a, d, t in raw]
-        if not items:
-            # Style G (CACE): <a href="info/..."><div><p>TITLE</p><h4>DATE</h4></div></a>
-            raw = re.findall(
-                r'<a[^>]*href="(?:\.\./)*info/(\d+)/(\d+)\.htm"[^>]*>\s*<div[^>]*>(?:<div[^>]*></div>)?\s*<p>(.*?)</p>\s*<h4>([\d-]+)</h4>',
-                html,
-                re.DOTALL,
-            )
-            items = [(c, a, t.strip(), d.strip()) for c, a, t, d in raw]
-        for cat_id, art_id, title, date_str in items:
-            title = re.sub(r"<[^>]+>", "", title).strip()
-            date_match = re.search(r"(\d{4})\D+(\d{2})\D+(\d{2})", date_str)
-            date = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}" if date_match else date_str.strip()
-            articles.append(Article(
-                id=f"{cat_id}/{art_id}",
-                title=title,
-                date=date,
+        """Extract articles from a list page."""
+        return [
+            Article(
+                id=f"{item.category_id}/{item.article_id}",
+                title=item.title,
+                date=item.date,
                 category=category_name,
-                url=f"{site.base_url}/info/{cat_id}/{art_id}.htm",
+                url=f"{site.base_url}/info/{item.category_id}/{item.article_id}.htm",
                 site=site.key,
-            ))
-        return articles
+            )
+            for item in parse_list_page(html)
+        ]
 
     def _fetch_content(self, url: str) -> str:
         resp = self._client.get(url)
         if resp.status_code != 200:
             return ""
-        match = re.search(r'class="v_news_content"[^>]*>(.*?)</div>', resp.text, re.DOTALL)
-        if not match:
-            return ""
-        content = re.sub(r"<[^>]+>", "", match.group(1))
-        return re.sub(r"\s+", " ", content).strip()
+        return extract_article_content(resp.text)
 
     def crawl(self, site_key: str, category_path: str | None = None,
               fetch_content: bool = True, max_pages: int = 0) -> int:
@@ -262,12 +203,15 @@ class CMSScraper:
         total_new = 0
 
         for path, cat_name in cats.items():
-            print(f"[*] {site.name} - {cat_name}...")
+            logger.info("Crawling CMS category", extra={"site": site.name, "category": cat_name})
             new_count = 0
 
             resp = self._client.get(f"{site.base_url}/{path}.htm")
             if resp.status_code != 200:
-                print(f"[!] Failed: {resp.status_code}")
+                logger.warning(
+                    "Failed to fetch CMS list page",
+                    extra={"site": site.name, "category": cat_name, "status_code": resp.status_code},
+                )
                 continue
 
             articles = self._parse_list_page(resp.text, cat_name, site)
@@ -309,7 +253,10 @@ class CMSScraper:
                         new_count += 1
 
             total_new += new_count
-            print(f"  +{new_count} new")
+            logger.info(
+                "Finished CMS category crawl",
+                extra={"site": site.name, "category": cat_name, "new_count": new_count},
+            )
 
         self._save_db(site_key)
         return total_new
