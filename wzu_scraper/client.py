@@ -17,9 +17,11 @@ from .jwxt_api import (
     parse_student_info_html,
 )
 from .xk import (
+    SelectedClass,
     TeachingClass,
     XkConfig,
     cancel_course,
+    get_selected_classes,
     get_xk_config,
     grab_course,
     query_courses,
@@ -281,11 +283,17 @@ class WZUClient:
         """Query available courses/teaching classes."""
         return query_courses(self._client, config, keyword, page)
 
+    def get_selected_courses(self) -> list[SelectedClass]:
+        """Fetch selected teaching classes from the right-side panel."""
+        return get_selected_classes(self._client)
+
     def select_course(self, config: XkConfig, tc: TeachingClass) -> tuple[bool, str]:
         """Select a single course. Returns (success, message)."""
         return select_course(self._client, config, tc)
 
-    def cancel_course(self, config: XkConfig, tc: TeachingClass) -> tuple[bool, str]:
+    def cancel_course(
+        self, config: XkConfig, tc: TeachingClass | SelectedClass
+    ) -> tuple[bool, str]:
         """Cancel a selected course. Returns (success, message)."""
         return cancel_course(self._client, config, tc)
 
@@ -296,12 +304,23 @@ class WZUClient:
         max_attempts: int = 50,
         interval: float = 0.3,
         on_attempt: callable = None,
+        jitter: float = 0.0,
+        start_at: float | None = None,
     ) -> tuple[bool, str, int]:
         """Repeatedly try to select a course (抢课).
 
         Returns (success, message, attempts_used).
         """
-        return grab_course(self._client, config, tc, max_attempts, interval, on_attempt)
+        return grab_course(
+            self._client,
+            config,
+            tc,
+            max_attempts,
+            interval,
+            on_attempt,
+            jitter,
+            start_at,
+        )
 
     def close(self):
         self._client.close()

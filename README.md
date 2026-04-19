@@ -10,12 +10,14 @@
 - 自动登录 CAS（处理 AES 加密 + OAuth2 跳转，登录一次后自动保存 session）
 - 查课程表、查成绩（支持按学年学期筛选）
 - 查考试安排（考场、座位号、时间）
+- 查询后可导出：课表/成绩/考试支持 `CSV`、`JSON`，考试额外支持 `ICS`
 
 **选课/抢课**
 - 搜索可选课程和教学班
+- 查看我的已选课程 / 教学班列表
 - 一键选课/退课
-- 抢课模式：自动重试 N 次，可设置间隔和最大尝试次数
-- 课程余量监控：定时检测是否有人退课，自动抢位
+- 抢课模式：自动重试 N 次，可设置间隔、最大尝试次数、随机抖动和定时开抢
+- 课程余量监控：定时检测是否有人退课，发现空位后自动抢位，并支持铃声 / macOS 桌面 / Telegram 提醒
 - 支持 Ctrl+C 随时中断
 
 **全站搜索**
@@ -91,12 +93,24 @@ alias wzu='cd /你的路径/wzu-scraper && uv run python main.py'
 
 进入「选课/抢课」后可以：
 - 搜索可选课程，查看教学班详情（教师、时间、已选/容量）
-- 选课或退课
-- 开启抢课模式：设置重试次数和间隔，自动疯狂抢课
+- 查看当前已选课程，再从已选列表里退课
+- 开启抢课模式：设置重试次数、间隔、抖动，或者定时到整点开抢
 
 进入「课程余量监控」后可以：
 - 选定一门课，定时检测是否有人退课
-- 有空位时自动抢课或提醒你
+- 有空位时自动抢课，或者通过铃声 / macOS 通知 / Telegram 提醒你
+
+如果要启用 Telegram 提醒，在 `.env` 里额外加：
+
+```
+WZU_TELEGRAM_BOT_TOKEN=你的机器人 token
+WZU_TELEGRAM_CHAT_ID=你的 chat id
+```
+
+查询课表 / 成绩 / 考试后，CLI 会顺手问你要不要导出：
+- `CSV`：适合表格整理
+- `JSON`：适合继续编程处理
+- `ICS`：考试安排可直接导入日历
 
 ### 作为 Python 库使用
 
@@ -137,9 +151,16 @@ with WZUClient() as client:
         if courses:
             tc = courses[0]  # 选第一个教学班
             ok, msg, attempts = client.grab_course(
-                config, tc, max_attempts=100, interval=0.3
+                config,
+                tc,
+                max_attempts=100,
+                interval=0.3,
+                jitter=0.1,
             )
             print(f"{'成功' if ok else '失败'}: {msg} (尝试 {attempts} 次)")
+
+    for tc in client.get_selected_courses():
+        print(f"已选: {tc.course_name} - {tc.class_name}")
 ```
 
 ## 项目结构
@@ -150,6 +171,7 @@ wzu-scraper/
 ├── wzu_scraper/
 │   ├── client.py            # CAS 登录 + 教务系统 API（课表/成绩/选课）
 │   ├── crypto.py            # AES-ECB 加密（匹配前端 CryptoJS）
+│   ├── exporters.py         # CSV/JSON/ICS 导出工具
 │   ├── xk.py                # 选课/抢课模块（逆向自 zzxkYzb.js）
 │   ├── cms.py               # 通用 CMS 爬虫（支持 7 个站点 7 种模板）
 │   └── cms_parsers.py       # CMS 列表页解析器（7 种 HTML 模板）
@@ -167,7 +189,9 @@ wzu-scraper/
 - CAS 单点登录的完整 9 步跳转链
 - AES-ECB 密码加密的逆向分析（以及为什么它形同虚设）
 - 正方教务系统 API 结构（gnmkdm 编码、学期参数等）
+- 考试查询接口和导出格式（CSV/JSON/ICS）
 - 选课系统 API 逆向（从 zzxkYzb.js 提取的接口和参数）
+- 已选课程右侧面板解析、定时开抢和余量提醒策略
 - 博达站群 CMS 的 7 种列表模板格式
 - 安全漏洞分析和日常使用建议
 

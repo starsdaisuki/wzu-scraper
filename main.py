@@ -5,9 +5,13 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timedelta
+from pathlib import Path
 
 from wzu_scraper.client import WZUClient
 from wzu_scraper.cms import CMSScraper, SITES
+from wzu_scraper.exporters import default_export_path, export_records
+from wzu_scraper.notifier import build_notifier
 
 # Load .env file if present
 _env_path = os.path.join(os.path.dirname(__file__), ".env")
@@ -139,18 +143,20 @@ def xk_menu(client: WZUClient):
         print(f"[+] Selection is OPEN (xkkz_id={config.xkkz_id})")
     else:
         print("[!] Selection is NOT open (当前不属于选课阶段)")
-        print("    You can still browse the menu, but selecting will fail.")
+        print("    Search/select will be blocked until selection opens.")
 
     # Cache for searched courses
     cached_courses: list = []
+    cached_selected: list = []
 
     while True:
         print("\n--- Course Selection (选课) ---")
         print("1. Search courses (搜索课程)")
-        print("2. Select a course (选课)")
-        print("3. GRAB mode - auto retry (抢课模式)")
-        print("4. Cancel a course (退课)")
-        print("5. Refresh config (刷新状态)")
+        print("2. Selected courses (我的已选课程)")
+        print("3. Select a course (选课)")
+        print("4. GRAB mode - auto retry (抢课模式)")
+        print("5. Cancel a selected course (退课)")
+        print("6. Refresh config (刷新状态)")
         print("0. Back")
 
         choice = input("\nChoice: ").strip()
@@ -172,6 +178,14 @@ def xk_menu(client: WZUClient):
             _print_course_list(courses)
 
         elif choice == "2":
+            cached_selected = client.get_selected_courses()
+            if not cached_selected:
+                print("No selected courses found")
+                continue
+            print(f"\n  Selected {len(cached_selected)} teaching classes:\n")
+            _print_selected_course_list(cached_selected)
+
+        elif choice == "3":
             if not config.is_valid:
                 print(f"[!] {config.message or 'Selection config is invalid'}")
                 continue
@@ -191,7 +205,7 @@ def xk_menu(client: WZUClient):
             except (ValueError, IndexError):
                 print("Invalid number")
 
-        elif choice == "3":
+        elif choice == "4":
             if not config.is_valid:
                 print(f"[!] {config.message or 'Selection config is invalid'}")
                 continue
@@ -221,9 +235,26 @@ def xk_menu(client: WZUClient):
             except ValueError:
                 print("Invalid number, using default 0.3")
                 interval = 0.3
+            jitter_str = input("Random jitter seconds [0.1]: ").strip()
+            try:
+                jitter = float(jitter_str) if jitter_str else 0.1
+            except ValueError:
+                print("Invalid number, using default 0.1")
+                jitter = 0.1
+            start_str = input("Start at HH:MM[:SS] [now]: ").strip()
+            start_at = _parse_start_time_input(start_str)
+            if start_str and start_at is None:
+                print("Invalid time format, starting immediately")
 
             print(f"\n[*] GRAB MODE: {tc.kcmc} - {tc.jxbmc}")
-            print(f"    Max attempts: {max_attempts}, interval: {interval}s")
+            print(
+                f"    Max attempts: {max_attempts}, interval: {interval}s, jitter: {jitter}s"
+            )
+            if start_at is not None:
+                print(
+                    "    Scheduled start:"
+                    f" {datetime.fromtimestamp(start_at).strftime('%Y-%m-%d %H:%M:%S')}"
+                )
             print("    Press Ctrl+C to stop\n")
 
             def on_attempt(n, ok, msg):
@@ -232,7 +263,13 @@ def xk_menu(client: WZUClient):
 
             try:
                 ok, msg, used = client.grab_course(
-                    config, tc, max_attempts, interval, on_attempt
+                    config,
+                    tc,
+                    max_attempts,
+                    interval,
+                    on_attempt,
+                    jitter,
+                    start_at,
                 )
                 if ok:
                     print(f"\n[+] SUCCESS after {used} attempts: {msg}")
@@ -241,27 +278,28 @@ def xk_menu(client: WZUClient):
             except KeyboardInterrupt:
                 print("\n[*] Stopped by user")
 
-        elif choice == "4":
+        elif choice == "5":
             if not config.is_valid:
                 print(f"[!] {config.message or 'Selection config is invalid'}")
                 continue
             if not config.is_open:
                 print("[!] Selection is not open, cannot cancel courses")
                 continue
-            if not cached_courses:
-                print("Search for courses first (option 1)")
+            cached_selected = client.get_selected_courses()
+            if not cached_selected:
+                print("No selected courses found")
                 continue
-            _print_course_list(cached_courses)
-            idx = input("\nWhich class to cancel? (#): ").strip()
+            _print_selected_course_list(cached_selected)
+            idx = input("\nWhich selected class to cancel? (#): ").strip()
             try:
-                tc = cached_courses[int(idx) - 1]
-                print(f"[*] Canceling: {tc.kcmc} - {tc.jxbmc}")
+                tc = cached_selected[int(idx) - 1]
+                print(f"[*] Canceling: {tc.course_name} - {tc.class_name}")
                 ok, msg = client.cancel_course(config, tc)
                 print(f"[{'+' if ok else '!'}] {msg}")
             except (ValueError, IndexError):
                 print("Invalid number")
 
-        elif choice == "5":
+        elif choice == "6":
             new_config = client.get_xk_config()
             if new_config:
                 config = new_config
@@ -289,6 +327,91 @@ def _print_course_list(courses):
             f"{tc.jxbmc:<12} {tc.xm:<8} "
             f"[{capacity:>7}] {tc.sksj or ''}"
         )
+
+
+def _print_selected_course_list(courses):
+    """Print a numbered list of selected teaching classes."""
+    for i, tc in enumerate(courses, 1):
+        teacher = tc.teacher or "-"
+        credit = f"{tc.credit}分" if tc.credit else ""
+        print(
+            f"  {i:>3}. {tc.course_name:<20} {credit:<6} {tc.class_name:<18} {teacher}"
+        )
+
+
+def _parse_start_time_input(value: str) -> float | None:
+    """Parse HH:MM or HH:MM:SS into a local timestamp."""
+    if not value:
+        return None
+
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            parsed = datetime.strptime(value, fmt)
+            now = datetime.now()
+            target = now.replace(
+                hour=parsed.hour,
+                minute=parsed.minute,
+                second=parsed.second,
+                microsecond=0,
+            )
+            if target <= now:
+                target += timedelta(days=1)
+            return target.timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def _configure_monitor_notifier():
+    """Prompt for optional vacancy notification backends."""
+    bell = input("Bell notification? (y/n) [y]: ").strip().lower()
+    desktop = input("Desktop notification? (y/n) [y]: ").strip().lower()
+    telegram = input("Telegram notification? (y/n) [n]: ").strip().lower()
+    wants_telegram = telegram == "y"
+    if wants_telegram and not (
+        os.environ.get("WZU_TELEGRAM_BOT_TOKEN")
+        and os.environ.get("WZU_TELEGRAM_CHAT_ID")
+    ):
+        print("[!] Telegram env vars missing, skipping Telegram notifier")
+    notifier = build_notifier(
+        bell=bell != "n",
+        desktop=desktop != "n",
+        telegram=wants_telegram,
+    )
+    return notifier
+
+
+def _maybe_export_records(kind: str, records: list[dict[str, str]]) -> None:
+    """Offer a simple export prompt after displaying structured data."""
+    if not records:
+        return
+
+    allowed_formats = ["csv", "json"]
+    if kind == "exams":
+        allowed_formats.append("ics")
+
+    choice = (
+        input(f"Export {kind}? [{'/'.join(allowed_formats)}/Enter skip]: ")
+        .strip()
+        .lower()
+    )
+    if not choice:
+        return
+    if choice not in allowed_formats:
+        print("Invalid format, skipping export")
+        return
+
+    default_path = default_export_path(kind, choice)
+    path_input = input(f"Output path [{default_path}]: ").strip()
+    output_path = Path(path_input) if path_input else default_path
+
+    try:
+        export_records(kind, records, choice, output_path)
+    except ValueError as exc:
+        print(f"[!] Export failed: {exc}")
+        return
+
+    print(f"[+] Exported to {output_path}")
 
 
 def monitor_menu(client: WZUClient):
@@ -331,13 +454,36 @@ def monitor_menu(client: WZUClient):
         interval = 10.0
 
     auto_grab = input("Auto-grab when available? (y/n) [n]: ").strip().lower() == "y"
+    notifier = _configure_monitor_notifier()
+    grab_attempts = 1
+    grab_interval = 0.3
+    grab_jitter = 0.1
+    if auto_grab:
+        attempts_str = input("Auto-grab attempts per vacancy [8]: ").strip()
+        try:
+            grab_attempts = int(attempts_str) if attempts_str else 8
+        except ValueError:
+            grab_attempts = 8
+        retry_interval = input("Auto-grab retry interval [0.3]: ").strip()
+        try:
+            grab_interval = float(retry_interval) if retry_interval else 0.3
+        except ValueError:
+            grab_interval = 0.3
+        jitter_str = input("Auto-grab jitter seconds [0.1]: ").strip()
+        try:
+            grab_jitter = float(jitter_str) if jitter_str else 0.1
+        except ValueError:
+            grab_jitter = 0.1
 
     print(f"\n[*] Monitoring: {tc.kcmc} - {tc.jxbmc}")
     print(f"    Current: {tc.yxzrs}/{tc.jxbrl}")
     print(f"    Interval: {interval}s, Auto-grab: {'yes' if auto_grab else 'no'}")
+    if notifier:
+        print("    Notification backends: enabled")
     print("    Press Ctrl+C to stop\n")
 
     check_num = 0
+    last_available = None
     try:
         while True:
             time.sleep(interval)
@@ -360,20 +506,41 @@ def monitor_menu(client: WZUClient):
             available = capacity - enrolled
 
             if available > 0:
-                print(
-                    f"  [{check_num}] *** VACANCY! *** "
-                    f"{match.yxzrs}/{match.jxbrl} "
-                    f"({available} spots open)"
+                message = (
+                    f"{match.kcmc} {match.jxbmc} 现在 {match.yxzrs}/{match.jxbrl}"
+                    f"，剩余 {available} 个名额"
                 )
+                print(f"  [{check_num}] *** VACANCY! *** {message}")
+                if notifier and last_available != available:
+                    notifier.notify("WZU 课程有空位", message)
+                    last_available = available
                 if auto_grab:
                     print(f"  [{check_num}] Auto-grabbing...")
-                    ok, msg = client.select_course(config, match)
+                    ok, msg, used = client.grab_course(
+                        config,
+                        match,
+                        grab_attempts,
+                        grab_interval,
+                        jitter=grab_jitter,
+                    )
                     if ok:
-                        print(f"  [{check_num}] SUCCESS: {msg}")
+                        success_message = (
+                            f"{match.kcmc} - {match.jxbmc} 抢课成功"
+                            f"（{used} 次尝试）: {msg}"
+                        )
+                        print(f"  [{check_num}] SUCCESS: {success_message}")
+                        if notifier:
+                            notifier.notify("WZU 抢课成功", success_message)
                         break
                     else:
                         print(f"  [{check_num}] Failed: {msg}, will keep trying")
+                        if notifier:
+                            notifier.notify(
+                                "WZU 抢课失败",
+                                f"{match.kcmc} - {match.jxbmc}: {msg}",
+                            )
             else:
+                last_available = 0
                 print(
                     f"  [{check_num}] Full: {match.yxzrs}/{match.jxbrl}",
                     end="\r",
@@ -431,6 +598,7 @@ def main():
                         )
                 else:
                     print("No courses found")
+                _maybe_export_records("schedule", courses)
 
             elif choice == "2":
                 year = input("School year (e.g. 2025-2026, empty=all): ").strip() or ""
@@ -447,6 +615,7 @@ def main():
                         )
                 else:
                     print("No grades found")
+                _maybe_export_records("grades", grades)
 
             elif choice == "3":
                 year = input("School year (e.g. 2025-2026): ").strip() or "2025-2026"
@@ -463,6 +632,7 @@ def main():
                         print()
                 else:
                     print("No exams found for this semester")
+                _maybe_export_records("exams", exams)
 
             elif choice == "4":
                 info = client.get_student_info()

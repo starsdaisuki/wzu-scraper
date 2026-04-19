@@ -3,7 +3,9 @@
 Reverse-engineered from /js/comp/jwglxt/xkgl/xsxk/zzxkYzb.js (N253512).
 """
 
+import html as html_lib
 import logging
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -52,6 +54,21 @@ class TeachingClass:
     jxbzls: str  # 教学班组类数
 
 
+@dataclass
+class SelectedClass:
+    """A selected teaching class parsed from the choosed panel HTML."""
+
+    jxb_id: str
+    do_jxb_id: str
+    kch_id: str
+    jxbzls: str
+    xkkz_id: str
+    course_name: str
+    class_name: str
+    teacher: str = ""
+    credit: str = ""
+
+
 def get_xk_config(client: httpx.Client) -> XkConfig | None:
     """Fetch course selection index page and extract config.
 
@@ -92,6 +109,19 @@ def get_xk_config(client: httpx.Client) -> XkConfig | None:
         is_valid=is_valid,
         message=message,
     )
+
+
+def get_selected_classes(client: httpx.Client) -> list[SelectedClass]:
+    """Fetch the selected teaching classes shown in the right-side panel."""
+    resp = client.get(f"{JWXT_BASE}/jwglxt/xsxk/zzxkyzb_cxZzxkYzbChoosed.html")
+    if resp.status_code != 200:
+        logger.warning(
+            "Failed to load selected classes panel",
+            extra={"status": resp.status_code},
+        )
+        return []
+
+    return parse_selected_classes_html(resp.text)
 
 
 def query_courses(
@@ -227,7 +257,7 @@ def select_course(
 def cancel_course(
     client: httpx.Client,
     config: XkConfig,
-    tc: TeachingClass,
+    tc: TeachingClass | SelectedClass,
 ) -> tuple[bool, str]:
     """Cancel a selected course.
 
@@ -280,6 +310,8 @@ def grab_course(
     max_attempts: int = 50,
     interval: float = 0.3,
     on_attempt: callable = None,
+    jitter: float = 0.0,
+    start_at: float | None = None,
 ) -> tuple[bool, str, int]:
     """Repeatedly try to select a course until success or max attempts.
 
@@ -290,6 +322,8 @@ def grab_course(
         max_attempts: Maximum number of attempts
         interval: Seconds between attempts (0.1 ~ 1.0 recommended)
         on_attempt: Optional callback(attempt_num, success, message)
+        jitter: Extra random delay added to each retry interval
+        start_at: Optional unix timestamp to start grabbing at
 
     Returns (success, message, attempts_used).
     """
@@ -297,27 +331,87 @@ def grab_course(
     if error:
         return False, error, 0
 
+    if start_at is not None:
+        delay = start_at - time.time()
+        if delay > 0:
+            time.sleep(delay)
+
     for attempt in range(1, max_attempts + 1):
         success, msg = select_course(client, config, tc)
+        classification = _classify_select_result(success, msg)
 
         if on_attempt:
             on_attempt(attempt, success, msg)
 
-        if success:
+        if classification == "success":
             return True, msg, attempt
 
-        # If server says we already selected it, treat as success
-        if "已选" in msg or "重复" in msg:
+        if classification == "equivalent_success":
             return True, msg, attempt
 
-        # If server says something permanent (not a race condition), stop
-        if any(k in msg for k in ["不属于选课阶段", "无操作权限", "禁选"]):
+        if classification == "permanent_error":
             return False, msg, attempt
 
         if attempt < max_attempts:
-            time.sleep(interval)
+            sleep_for = max(0.0, interval)
+            if jitter > 0:
+                sleep_for += random.uniform(0.0, jitter)
+            time.sleep(sleep_for)
 
     return False, f"达到最大尝试次数 ({max_attempts})", max_attempts
+
+
+def parse_selected_classes_html(html: str) -> list[SelectedClass]:
+    """Parse the selected-course panel HTML into a flat list."""
+    starts = [
+        match.start()
+        for match in re.finditer(
+            r'<div[^>]*class=["\'][^"\']*outer_xkxx_list[^"\']*["\'][^>]*>', html
+        )
+    ]
+    if not starts:
+        return []
+
+    blocks: list[str] = []
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(html)
+        blocks.append(html[start:end])
+
+    selected: list[SelectedClass] = []
+    for block in blocks:
+        course_name = _extract_html_text(block, "kcmc")
+        credit = _extract_input_value(block, "right_xf")
+        class_parts = re.split(r'<input[^>]*name=["\']right_jxb_id["\']', block)
+        if len(class_parts) <= 1:
+            continue
+
+        for part in class_parts[1:]:
+            value_match = re.search(r'value=["\']([^"\']+)["\']', part)
+            if not value_match:
+                continue
+            jxb_id = value_match.group(1)
+            cancel_match = re.search(
+                rf"cancelCourseZzxk\('leftpage','{re.escape(jxb_id)}','([^']*)','([^']*)','([^']*)','([^']*)'\)",
+                part,
+            )
+            if not cancel_match:
+                continue
+
+            selected.append(
+                SelectedClass(
+                    jxb_id=jxb_id,
+                    do_jxb_id=cancel_match.group(1),
+                    kch_id=cancel_match.group(2),
+                    jxbzls=cancel_match.group(3),
+                    xkkz_id=cancel_match.group(4),
+                    course_name=course_name or cancel_match.group(2),
+                    class_name=_extract_html_text(part, "jxbmc") or jxb_id,
+                    teacher=_extract_html_text(part, "jsxm"),
+                    credit=_extract_input_value(part, "right_jxbxf") or credit,
+                )
+            )
+
+    return selected
 
 
 def _get_config_error(config: XkConfig) -> str:
@@ -327,6 +421,36 @@ def _get_config_error(config: XkConfig) -> str:
     if config.message:
         return config.message
     return "选课配置不完整"
+
+
+def _classify_select_result(success: bool, msg: str) -> str:
+    """Classify a select-course result for retry logic."""
+    if success:
+        return "success"
+    if "已选" in msg or "重复" in msg:
+        return "equivalent_success"
+    if any(k in msg for k in ["不属于选课阶段", "无操作权限", "禁选"]):
+        return "permanent_error"
+    return "retryable_error"
+
+
+def _extract_html_text(html: str, class_name: str) -> str:
+    match = re.search(
+        rf'class=["\'][^"\']*{re.escape(class_name)}[^"\']*["\'][^>]*>(.*?)</[^>]+>',
+        html,
+        re.DOTALL,
+    )
+    if not match:
+        return ""
+    return html_lib.unescape(re.sub(r"<[^>]+>", "", match.group(1))).strip()
+
+
+def _extract_input_value(html: str, name: str) -> str:
+    match = re.search(
+        rf'<input[^>]*name=["\']{re.escape(name)}["\'][^>]*value=["\']([^"\']*)["\']',
+        html,
+    )
+    return match.group(1) if match else ""
 
 
 def _extract_hidden(html: str, name: str) -> str:

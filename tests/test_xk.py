@@ -5,9 +5,12 @@ from wzu_scraper.xk import (
     XkConfig,
     get_xk_config,
     grab_course,
+    parse_selected_classes_html,
     query_courses,
     select_course,
 )
+
+from .conftest import read_fixture
 
 
 def _make_client(handler):
@@ -130,3 +133,70 @@ def test_grab_course_rejects_invalid_config_without_attempts():
     assert ok is False
     assert msg == "当前不属于选课阶段"
     assert attempts == 0
+
+
+def test_parse_selected_classes_html_extracts_selected_courses():
+    selected = parse_selected_classes_html(
+        read_fixture("jwxt", "selected_courses.html")
+    )
+
+    assert [c.course_name for c in selected] == [
+        "高级语言程序设计",
+        "概率论与数理统计",
+    ]
+    assert selected[0].class_name == "01班"
+    assert selected[0].teacher == "张老师"
+    assert selected[0].do_jxb_id == "DO001"
+    assert selected[1].credit == "4.0"
+    assert selected[1].xkkz_id == "XKKZ002"
+
+
+def test_grab_course_supports_start_time_and_jitter(monkeypatch):
+    attempts = iter(
+        [
+            {"flag": "0", "msg": "课程已满"},
+            {"flag": "1", "msg": "选课成功"},
+        ]
+    )
+
+    def handler(request):
+        return httpx.Response(200, json=next(attempts))
+
+    sleep_calls = []
+
+    monkeypatch.setattr("wzu_scraper.xk.time.time", lambda: 100.0)
+    monkeypatch.setattr("wzu_scraper.xk.time.sleep", sleep_calls.append)
+    monkeypatch.setattr("wzu_scraper.xk.random.uniform", lambda a, b: 0.2)
+
+    client = _make_client(handler)
+    config = XkConfig("xkkz", "2025", "12", "01", "2023", "stat", is_open=True)
+    tc = TeachingClass(
+        "jxb",
+        "do",
+        "kch",
+        "KCH",
+        "高等数学",
+        "4",
+        "01班",
+        "教师",
+        "",
+        "",
+        "0",
+        "100",
+        "1",
+    )
+
+    ok, msg, used = grab_course(
+        client,
+        config,
+        tc,
+        max_attempts=2,
+        interval=0.3,
+        jitter=0.2,
+        start_at=101.0,
+    )
+
+    assert ok is True
+    assert msg == "选课成功"
+    assert used == 2
+    assert sleep_calls == [1.0, 0.5]

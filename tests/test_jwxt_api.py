@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 
 from wzu_scraper.jwxt_api import (
+    build_exams_payload,
     build_grades_payload,
     build_schedule_payload,
+    parse_exams_json,
     parse_grades_json,
     parse_schedule_json,
     parse_student_info_html,
@@ -54,11 +56,35 @@ def test_parse_grades_json_normalizes_fields() -> None:
     ]
 
 
+def test_parse_exams_json_normalizes_fields() -> None:
+    payload = json.loads(read_fixture("jwxt", "exams.json"))
+
+    assert parse_exams_json(payload) == [
+        {
+            "name": "大学英语(一)",
+            "time": "2026-01-19(09:00-11:00)",
+            "location": "南11-A202",
+            "campus": "南校区",
+            "seat": "2",
+            "exam_name": "2025-2026-1全校公共课期末考试",
+            "teacher": "教师甲",
+            "credit": "4.0",
+        }
+    ]
+
+
 def test_request_payload_builders_match_expected_parameters() -> None:
     assert build_schedule_payload("2025-2026", "2") == {"xnm": "2025", "xqm": "12"}
     assert build_grades_payload("", "") == {
         "xnm": "",
         "xqm": "",
         "queryModel.showCount": "100",
+        "queryModel.currentPage": "1",
+    }
+    assert build_exams_payload("2025-2026", "1") == {
+        "xnm": "2025",
+        "xqm": "3",
+        "ksmcdm": "",
+        "queryModel.showCount": "50",
         "queryModel.currentPage": "1",
     }
