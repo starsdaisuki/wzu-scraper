@@ -115,8 +115,7 @@ wzu-scraper/
 ├── wzu_scraper/
 │   ├── client.py            # CAS 登录 + 教务系统 API（课表/成绩）
 │   ├── crypto.py            # AES-ECB 加密（匹配前端 CryptoJS）
-│   ├── cms.py               # 通用 CMS 爬虫（支持 7 个站点 7 种模板）
-│   └── jwc.py               # 教务处爬虫（旧版，已被 cms.py 替代）
+│   └── cms.py               # 通用 CMS 爬虫（支持 7 个站点 7 种模板）
 ├── docs/
 │   └── technical-analysis.md # 技术分析：登录流程逆向、安全分析、CMS 架构
 ├── .env                     # 账号密码（不进 git）
