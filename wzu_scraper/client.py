@@ -128,10 +128,19 @@ class WZUClient:
                 logger.warning("CAS login failed", extra={"final_url": final_url})
             return False
 
-        logger.info("CAS login ended at unexpected URL", extra={"final_url": final_url})
-        self._logged_in = True
-        self._save_cookies()
-        return True
+        if self.check_session():
+            logger.info(
+                "CAS login verified via session check", extra={"final_url": final_url}
+            )
+            self._logged_in = True
+            self._save_cookies()
+            return True
+
+        logger.warning(
+            "CAS login did not yield a valid session",
+            extra={"final_url": final_url, "status_code": post_resp.status_code},
+        )
+        return False
 
     def check_session(self) -> bool:
         """Check if the current session is still valid."""

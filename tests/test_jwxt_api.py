@@ -16,7 +16,11 @@ from .conftest import read_fixture
 def test_parse_student_info_html_extracts_name() -> None:
     info = parse_student_info_html(read_fixture("jwxt", "student_info.html"))
 
-    assert info == {"name": "学生甲"}
+    assert info == {
+        "name": "学生甲",
+        "role": "学生",
+        "profile": "数理学院 23统计1",
+    }
 
 
 def test_parse_schedule_json_normalizes_fields() -> None:

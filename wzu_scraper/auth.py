@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import re
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from .crypto import aes_encrypt, generate_aes_key
 
@@ -59,4 +60,7 @@ def extract_login_error(html: str) -> str | None:
 
 def is_jwxt_url(url: str) -> bool:
     """Return whether the current URL points at the JWXT application."""
-    return "jwglxt" in url or "index" in url
+    parsed = urlparse(url)
+    if parsed.netloc != "jwxt.wzu.edu.cn":
+        return False
+    return parsed.path.startswith("/jwglxt") or parsed.path == "/sso/zfiotlogin"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html as html_lib
 import re
 
 SCHEDULE_XQM_MAP = {"1": "3", "2": "12", "3": "16"}
@@ -35,8 +36,31 @@ def parse_student_info_html(html: str) -> dict[str, str | int]:
     """Extract the minimal student info exposed by the home page."""
     info: dict[str, str | int] = {}
 
+    heading_match = re.search(
+        r'<h4[^>]*class="media-heading"[^>]*>\s*(.*?)\s*</h4>',
+        html,
+        re.DOTALL,
+    )
+    if heading_match:
+        heading = html_lib.unescape(
+            re.sub(r"<[^>]+>", "", heading_match.group(1))
+        ).strip()
+        parts = [
+            part.strip() for part in re.split(r"\s{2,}|\xa0+", heading) if part.strip()
+        ]
+        if parts:
+            info["name"] = parts[0]
+        if len(parts) > 1:
+            info["role"] = parts[-1]
+
+    profile_match = re.search(r"<p>\s*([^<]+?)\s*</p>", html)
+    if profile_match:
+        profile = html_lib.unescape(profile_match.group(1)).strip()
+        if profile:
+            info["profile"] = profile
+
     name_match = re.search(r"用户名[：:]\s*([^<\s]+)", html)
-    if name_match:
+    if name_match and "name" not in info:
         info["name"] = name_match.group(1)
 
     return info
