@@ -4,6 +4,7 @@ import getpass
 import json
 import os
 import sys
+import time
 
 from wzu_scraper.client import WZUClient
 from wzu_scraper.cms import CMSScraper, SITES
@@ -290,6 +291,97 @@ def _print_course_list(courses):
         )
 
 
+def monitor_menu(client: WZUClient):
+    """Course vacancy monitor (课程余量监控) sub-menu."""
+    print("\n[*] Loading course selection config...")
+    config = client.get_xk_config()
+    if not config:
+        print("[!] Failed to load selection config")
+        return
+
+    if not config.is_valid:
+        print(f"[!] {config.message or 'Selection config is invalid'}")
+        print("    Monitor requires selection to be open.")
+        return
+
+    if not config.is_open:
+        print("[!] Selection is not open, monitor won't work")
+        return
+
+    print("[+] Selection is open, ready to monitor")
+    print("\nFirst, search for the course you want to monitor.")
+    keyword = input("Keyword (课程名/课程号/教师): ").strip()
+    courses = client.query_courses(config, keyword)
+    if not courses:
+        print("No courses found")
+        return
+
+    _print_course_list(courses)
+    idx = input("\nWhich class to monitor? (#): ").strip()
+    try:
+        tc = courses[int(idx) - 1]
+    except (ValueError, IndexError):
+        print("Invalid number")
+        return
+
+    interval_str = input("Check interval seconds [10]: ").strip()
+    try:
+        interval = float(interval_str) if interval_str else 10.0
+    except ValueError:
+        interval = 10.0
+
+    auto_grab = input("Auto-grab when available? (y/n) [n]: ").strip().lower() == "y"
+
+    print(f"\n[*] Monitoring: {tc.kcmc} - {tc.jxbmc}")
+    print(f"    Current: {tc.yxzrs}/{tc.jxbrl}")
+    print(f"    Interval: {interval}s, Auto-grab: {'yes' if auto_grab else 'no'}")
+    print("    Press Ctrl+C to stop\n")
+
+    check_num = 0
+    try:
+        while True:
+            time.sleep(interval)
+            check_num += 1
+
+            # Re-query to get updated capacity
+            updated = client.query_courses(config, tc.kcmc)
+            match = None
+            for c in updated:
+                if c.jxb_id == tc.jxb_id:
+                    match = c
+                    break
+
+            if not match:
+                print(f"  [{check_num}] Could not find class in results")
+                continue
+
+            enrolled = int(match.yxzrs) if match.yxzrs.isdigit() else 0
+            capacity = int(match.jxbrl) if match.jxbrl.isdigit() else 0
+            available = capacity - enrolled
+
+            if available > 0:
+                print(
+                    f"  [{check_num}] *** VACANCY! *** "
+                    f"{match.yxzrs}/{match.jxbrl} "
+                    f"({available} spots open)"
+                )
+                if auto_grab:
+                    print(f"  [{check_num}] Auto-grabbing...")
+                    ok, msg = client.select_course(config, match)
+                    if ok:
+                        print(f"  [{check_num}] SUCCESS: {msg}")
+                        break
+                    else:
+                        print(f"  [{check_num}] Failed: {msg}, will keep trying")
+            else:
+                print(
+                    f"  [{check_num}] Full: {match.yxzrs}/{match.jxbrl}",
+                    end="\r",
+                )
+    except KeyboardInterrupt:
+        print(f"\n[*] Stopped after {check_num} checks")
+
+
 def main():
     with WZUClient() as client:
         # Check if existing session works
@@ -314,10 +406,12 @@ def main():
             print("\n--- WZU Scraper ---")
             print("1. Course schedule (课程表)")
             print("2. Grades (成绩)")
-            print("3. Student info (个人信息)")
-            print("4. Website search (网站搜索)")
-            print("5. Course selection (选课/抢课)")
-            print("6. Session status")
+            print("3. Exams (考试安排)")
+            print("4. Student info (个人信息)")
+            print("5. Website search (网站搜索)")
+            print("6. Course selection (选课/抢课)")
+            print("7. Course monitor (课程余量监控)")
+            print("8. Session status")
             print("0. Exit")
 
             choice = input("\nChoice: ").strip()
@@ -355,16 +449,35 @@ def main():
                     print("No grades found")
 
             elif choice == "3":
+                year = input("School year (e.g. 2025-2026): ").strip() or "2025-2026"
+                sem = input("Semester (1=fall, 2=spring): ").strip() or "1"
+                exams = client.get_exams(year, sem)
+                if exams:
+                    print(f"\n  Found {len(exams)} exams:\n")
+                    for i, e in enumerate(exams, 1):
+                        print(f"  {i}. {e['name']}")
+                        print(f"     Time:     {e['time']}")
+                        print(f"     Location: {e['location']} ({e['campus']})")
+                        print(f"     Seat:     {e['seat']}")
+                        print(f"     Teacher:  {e['teacher']}")
+                        print()
+                else:
+                    print("No exams found for this semester")
+
+            elif choice == "4":
                 info = client.get_student_info()
                 print(json.dumps(info, ensure_ascii=False, indent=2))
 
-            elif choice == "4":
+            elif choice == "5":
                 cms_menu(scraper)
 
-            elif choice == "5":
+            elif choice == "6":
                 xk_menu(client)
 
-            elif choice == "6":
+            elif choice == "7":
+                monitor_menu(client)
+
+            elif choice == "8":
                 valid = client.check_session()
                 print(f"Session valid: {valid}")
 

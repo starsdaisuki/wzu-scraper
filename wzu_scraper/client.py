@@ -8,8 +8,10 @@ import httpx
 
 from .auth import build_login_data, extract_login_error, is_jwxt_url, parse_login_page
 from .jwxt_api import (
+    build_exams_payload,
     build_grades_payload,
     build_schedule_payload,
+    parse_exams_json,
     parse_grades_json,
     parse_schedule_json,
     parse_student_info_html,
@@ -236,6 +238,36 @@ class WZUClient:
             return []
 
         return parse_grades_json(data)
+
+    def get_exams(
+        self, school_year: str = "2025-2026", semester: str = "1"
+    ) -> list[dict]:
+        """Fetch exam schedule (考试安排).
+
+        Args:
+            school_year: e.g. "2025-2026"
+            semester: "1" for fall, "2" for spring. Use "" for all.
+        """
+        resp = self._client.post(
+            f"{JWXT_BASE}/jwglxt/kwgl/kscx_cxXsksxxIndex.html",
+            params={"doType": "query", "gnmkdm": "N358105"},
+            data=build_exams_payload(school_year, semester),
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+
+        if resp.status_code != 200:
+            logger.warning(
+                "Failed to fetch exams", extra={"status_code": resp.status_code}
+            )
+            return []
+
+        try:
+            data = resp.json()
+        except json.JSONDecodeError:
+            logger.warning("Exams response was not JSON")
+            return []
+
+        return parse_exams_json(data)
 
     # --- Course Selection (选课) ---
 

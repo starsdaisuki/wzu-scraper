@@ -9,11 +9,13 @@
 **教务系统**
 - 自动登录 CAS（处理 AES 加密 + OAuth2 跳转，登录一次后自动保存 session）
 - 查课程表、查成绩（支持按学年学期筛选）
+- 查考试安排（考场、座位号、时间）
 
 **选课/抢课**
 - 搜索可选课程和教学班
 - 一键选课/退课
 - 抢课模式：自动重试 N 次，可设置间隔和最大尝试次数
+- 课程余量监控：定时检测是否有人退课，自动抢位
 - 支持 Ctrl+C 随时中断
 
 **全站搜索**
@@ -76,10 +78,12 @@ alias wzu='cd /你的路径/wzu-scraper && uv run python main.py'
 --- WZU Scraper ---
 1. Course schedule (课程表)
 2. Grades (成绩)
-3. Student info (个人信息)
-4. Website search (网站搜索)
-5. Course selection (选课/抢课)  ← 抢课在这里
-6. Session status
+3. Exams (考试安排)              ← 考场、座位号
+4. Student info (个人信息)
+5. Website search (网站搜索)
+6. Course selection (选课/抢课)  ← 抢课在这里
+7. Course monitor (课程余量监控) ← 自动蹲位
+8. Session status
 0. Exit
 ```
 
@@ -89,6 +93,10 @@ alias wzu='cd /你的路径/wzu-scraper && uv run python main.py'
 - 搜索可选课程，查看教学班详情（教师、时间、已选/容量）
 - 选课或退课
 - 开启抢课模式：设置重试次数和间隔，自动疯狂抢课
+
+进入「课程余量监控」后可以：
+- 选定一门课，定时检测是否有人退课
+- 有空位时自动抢课或提醒你
 
 ### 作为 Python 库使用
 

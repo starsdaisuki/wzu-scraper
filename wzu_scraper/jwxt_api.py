@@ -7,6 +7,7 @@ import re
 
 SCHEDULE_XQM_MAP = {"1": "3", "2": "12", "3": "16"}
 GRADES_XQM_MAP = {"1": "3", "2": "12", "3": "16", "": ""}
+EXAMS_XQM_MAP = {"1": "3", "2": "12", "3": "16", "": ""}
 
 
 def school_year_to_xnm(school_year: str) -> str:
@@ -79,6 +80,36 @@ def parse_schedule_json(data: dict) -> list[dict[str, str]]:
             "credit": item.get("xf", ""),
         }
         for item in data.get("kbList", [])
+    ]
+
+
+def build_exams_payload(school_year: str, semester: str) -> dict[str, str]:
+    """Build the form payload for the exams API."""
+    return {
+        "xnm": school_year_to_xnm(school_year),
+        "xqm": EXAMS_XQM_MAP.get(semester, "12"),
+        "ksmcdm": "",
+        "queryModel.showCount": "50",
+        "queryModel.currentPage": "1",
+    }
+
+
+def parse_exams_json(data: dict) -> list[dict[str, str]]:
+    """Normalize the exams response into the public client shape."""
+    return [
+        {
+            "name": item.get("kcmc", ""),
+            "time": item.get("kssj", ""),
+            "location": item.get("cdmc", ""),
+            "campus": item.get("cdxqmc", ""),
+            "seat": item.get("zwh", ""),
+            "exam_name": item.get("ksmc", ""),
+            "teacher": item.get("jsxx", "").split("/")[-1]
+            if "/" in item.get("jsxx", "")
+            else item.get("jsxx", ""),
+            "credit": item.get("xf", ""),
+        }
+        for item in data.get("items", [])
     ]
 
 
