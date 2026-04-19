@@ -65,7 +65,17 @@ def test_query_courses_returns_empty_for_invalid_config_without_request():
         return httpx.Response(500)
 
     client = _make_client(handler)
-    config = XkConfig("", "", "", "", "", "", is_open=False, is_valid=False, message="当前不属于选课阶段")
+    config = XkConfig(
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        is_open=False,
+        is_valid=False,
+        message="当前不属于选课阶段",
+    )
 
     assert query_courses(client, config, "高等数学") == []
     assert called is False
@@ -80,7 +90,17 @@ def test_select_course_rejects_invalid_config_without_request():
         return httpx.Response(500)
 
     client = _make_client(handler)
-    config = XkConfig("", "", "", "", "", "", is_open=False, is_valid=False, message="当前不属于选课阶段")
+    config = XkConfig(
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        is_open=False,
+        is_valid=False,
+        message="当前不属于选课阶段",
+    )
     tc = TeachingClass("", "", "", "", "高等数学", "4", "", "", "", "", "0", "0", "1")
 
     ok, msg = select_course(client, config, tc)
@@ -91,7 +111,17 @@ def test_select_course_rejects_invalid_config_without_request():
 
 
 def test_grab_course_rejects_invalid_config_without_attempts():
-    config = XkConfig("", "", "", "", "", "", is_open=False, is_valid=False, message="当前不属于选课阶段")
+    config = XkConfig(
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        is_open=False,
+        is_valid=False,
+        message="当前不属于选课阶段",
+    )
     tc = TeachingClass("", "", "", "", "高等数学", "4", "", "", "", "", "0", "0", "1")
     client = _make_client(lambda request: httpx.Response(500))
 
