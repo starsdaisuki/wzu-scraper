@@ -184,6 +184,10 @@ def xk_menu(client: WZUClient):
                 continue
             print(f"\n  Selected {len(cached_selected)} teaching classes:\n")
             _print_selected_course_list(cached_selected)
+            _maybe_export_records(
+                "selected_courses",
+                [_selected_course_to_dict(tc) for tc in cached_selected],
+            )
 
         elif choice == "3":
             if not config.is_valid:
@@ -339,6 +343,66 @@ def _print_selected_course_list(courses):
         )
 
 
+def _selected_course_to_dict(tc) -> dict[str, str]:
+    return {
+        "course_name": tc.course_name,
+        "class_name": tc.class_name,
+        "teacher": tc.teacher,
+        "credit": tc.credit,
+        "jxb_id": tc.jxb_id,
+        "do_jxb_id": tc.do_jxb_id,
+        "kch_id": tc.kch_id,
+        "jxbzls": tc.jxbzls,
+        "xkkz_id": tc.xkkz_id,
+    }
+
+
+def _parse_index_selection(items, raw: str):
+    selected = []
+    seen = set()
+    for part in raw.replace(" ", "").split(","):
+        if not part:
+            continue
+        try:
+            idx = int(part) - 1
+        except ValueError:
+            return []
+        if idx < 0 or idx >= len(items) or idx in seen:
+            continue
+        seen.add(idx)
+        selected.append(items[idx])
+    return selected
+
+
+def _append_monitor_log(
+    path: Path | None,
+    check_num: int,
+    tc,
+    *,
+    status: str,
+    available: int | None,
+    detail: str = "",
+) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "check": check_num,
+        "status": status,
+        "course": getattr(tc, "kcmc", ""),
+        "class_name": getattr(tc, "jxbmc", ""),
+        "teacher": getattr(tc, "xm", ""),
+        "jxb_id": getattr(tc, "jxb_id", ""),
+        "capacity": getattr(tc, "jxbrl", ""),
+        "enrolled": getattr(tc, "yxzrs", ""),
+        "available": available,
+        "detail": detail,
+    }
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def _parse_start_time_input(value: str) -> float | None:
     """Parse HH:MM or HH:MM:SS into a local timestamp."""
     if not value:
@@ -387,7 +451,7 @@ def _maybe_export_records(kind: str, records: list[dict[str, str]]) -> None:
         return
 
     allowed_formats = ["csv", "json"]
-    if kind == "exams":
+    if kind in {"exams", "schedule"}:
         allowed_formats.append("ics")
 
     choice = (
@@ -404,9 +468,27 @@ def _maybe_export_records(kind: str, records: list[dict[str, str]]) -> None:
     default_path = default_export_path(kind, choice)
     path_input = input(f"Output path [{default_path}]: ").strip()
     output_path = Path(path_input) if path_input else default_path
+    export_context = None
+    if kind == "schedule" and choice == "ics":
+        week1_monday = input("Week 1 Monday date [YYYY-MM-DD]: ").strip()
+        try:
+            datetime.strptime(week1_monday, "%Y-%m-%d")
+        except ValueError:
+            print("[!] Invalid date, skipping export")
+            return
+        summary_prefix = input("Schedule title prefix [课表]: ").strip() or "课表"
+        category = input("Calendar category tag [课程]: ").strip() or "课程"
+        calendar_color = input("Calendar color hex [skip]: ").strip()
+        export_context = {
+            "week1_monday": week1_monday,
+            "summary_prefix": summary_prefix,
+            "category": category,
+            "calendar_name": "WZU Schedule",
+            "calendar_color": calendar_color,
+        }
 
     try:
-        export_records(kind, records, choice, output_path)
+        export_records(kind, records, choice, output_path, context=export_context)
     except ValueError as exc:
         print(f"[!] Export failed: {exc}")
         return
@@ -440,11 +522,10 @@ def monitor_menu(client: WZUClient):
         return
 
     _print_course_list(courses)
-    idx = input("\nWhich class to monitor? (#): ").strip()
-    try:
-        tc = courses[int(idx) - 1]
-    except (ValueError, IndexError):
-        print("Invalid number")
+    idx = input("\nWhich classes to monitor? (# or 1,3,5): ").strip()
+    targets = _parse_index_selection(courses, idx)
+    if not targets:
+        print("Invalid selection")
         return
 
     interval_str = input("Check interval seconds [10]: ").strip()
@@ -455,6 +536,14 @@ def monitor_menu(client: WZUClient):
 
     auto_grab = input("Auto-grab when available? (y/n) [n]: ").strip().lower() == "y"
     notifier = _configure_monitor_notifier()
+    log_path = default_export_path("course-monitor", "jsonl")
+    log_choice = input(f"Write monitor log? (y/n) [y], path [{log_path}]: ").strip()
+    if log_choice.lower() == "n":
+        log_path = None
+    else:
+        custom_log = input("Log path override [Enter keep default]: ").strip()
+        if custom_log:
+            log_path = Path(custom_log)
     grab_attempts = 1
     grab_interval = 0.3
     grab_jitter = 0.1
@@ -475,76 +564,101 @@ def monitor_menu(client: WZUClient):
         except ValueError:
             grab_jitter = 0.1
 
-    print(f"\n[*] Monitoring: {tc.kcmc} - {tc.jxbmc}")
-    print(f"    Current: {tc.yxzrs}/{tc.jxbrl}")
+    print(f"\n[*] Monitoring {len(targets)} class(es):")
+    for tc in targets:
+        print(f"    - {tc.kcmc} - {tc.jxbmc} [{tc.yxzrs}/{tc.jxbrl}]")
     print(f"    Interval: {interval}s, Auto-grab: {'yes' if auto_grab else 'no'}")
     if notifier:
         print("    Notification backends: enabled")
+    if log_path:
+        print(f"    Log file: {log_path}")
     print("    Press Ctrl+C to stop\n")
 
     check_num = 0
-    last_available = None
+    last_available: dict[str, int | None] = {tc.jxb_id: None for tc in targets}
+    zero_to_open_only = (
+        input("Notify only on 0 -> vacancy transitions? (y/n) [y]: ").strip().lower()
+        != "n"
+    )
     try:
         while True:
             time.sleep(interval)
             check_num += 1
 
-            # Re-query to get updated capacity
-            updated = client.query_courses(config, tc.kcmc)
-            match = None
-            for c in updated:
-                if c.jxb_id == tc.jxb_id:
-                    match = c
-                    break
+            for tc in targets:
+                updated = client.query_courses(config, tc.kcmc)
+                match = next((c for c in updated if c.jxb_id == tc.jxb_id), None)
 
-            if not match:
-                print(f"  [{check_num}] Could not find class in results")
-                continue
-
-            enrolled = int(match.yxzrs) if match.yxzrs.isdigit() else 0
-            capacity = int(match.jxbrl) if match.jxbrl.isdigit() else 0
-            available = capacity - enrolled
-
-            if available > 0:
-                message = (
-                    f"{match.kcmc} {match.jxbmc} 现在 {match.yxzrs}/{match.jxbrl}"
-                    f"，剩余 {available} 个名额"
-                )
-                print(f"  [{check_num}] *** VACANCY! *** {message}")
-                if notifier and last_available != available:
-                    notifier.notify("WZU 课程有空位", message)
-                    last_available = available
-                if auto_grab:
-                    print(f"  [{check_num}] Auto-grabbing...")
-                    ok, msg, used = client.grab_course(
-                        config,
-                        match,
-                        grab_attempts,
-                        grab_interval,
-                        jitter=grab_jitter,
+                if not match:
+                    print(f"  [{check_num}] Could not find {tc.kcmc} - {tc.jxbmc}")
+                    _append_monitor_log(
+                        log_path,
+                        check_num,
+                        tc,
+                        status="missing",
+                        available=None,
                     )
-                    if ok:
-                        success_message = (
-                            f"{match.kcmc} - {match.jxbmc} 抢课成功"
-                            f"（{used} 次尝试）: {msg}"
-                        )
-                        print(f"  [{check_num}] SUCCESS: {success_message}")
-                        if notifier:
-                            notifier.notify("WZU 抢课成功", success_message)
-                        break
-                    else:
-                        print(f"  [{check_num}] Failed: {msg}, will keep trying")
-                        if notifier:
-                            notifier.notify(
-                                "WZU 抢课失败",
-                                f"{match.kcmc} - {match.jxbmc}: {msg}",
-                            )
-            else:
-                last_available = 0
-                print(
-                    f"  [{check_num}] Full: {match.yxzrs}/{match.jxbrl}",
-                    end="\r",
+                    continue
+
+                enrolled = int(match.yxzrs) if match.yxzrs.isdigit() else 0
+                capacity = int(match.jxbrl) if match.jxbrl.isdigit() else 0
+                available = capacity - enrolled
+                previous_available = last_available[match.jxb_id]
+                _append_monitor_log(
+                    log_path,
+                    check_num,
+                    match,
+                    status="available" if available > 0 else "full",
+                    available=available,
                 )
+
+                if available > 0:
+                    message = (
+                        f"{match.kcmc} {match.jxbmc} 现在 {match.yxzrs}/{match.jxbrl}"
+                        f"，剩余 {available} 个名额"
+                    )
+                    print(f"  [{check_num}] *** VACANCY! *** {message}")
+                    should_notify = previous_available != available and (
+                        not zero_to_open_only
+                        or previous_available in (None, 0)
+                        or available > previous_available
+                    )
+                    if notifier and should_notify:
+                        notifier.notify("WZU 课程有空位", message)
+                    last_available[match.jxb_id] = available
+                    if auto_grab:
+                        print(f"  [{check_num}] Auto-grabbing...")
+                        ok, msg, used = client.grab_course(
+                            config,
+                            match,
+                            grab_attempts,
+                            grab_interval,
+                            jitter=grab_jitter,
+                        )
+                        _append_monitor_log(
+                            log_path,
+                            check_num,
+                            match,
+                            status="grab_success" if ok else "grab_failed",
+                            available=available,
+                            detail=msg,
+                        )
+                        if ok:
+                            success_message = (
+                                f"{match.kcmc} - {match.jxbmc} 抢课成功"
+                                f"（{used} 次尝试）: {msg}"
+                            )
+                            print(f"  [{check_num}] SUCCESS: {success_message}")
+                            if notifier:
+                                notifier.notify("WZU 抢课成功", success_message)
+                            return
+                        print(f"  [{check_num}] Failed: {msg}, will keep trying")
+                else:
+                    last_available[match.jxb_id] = 0
+                    print(
+                        f"  [{check_num}] Full: {match.kcmc} {match.jxbmc} {match.yxzrs}/{match.jxbrl}",
+                        end="\r",
+                    )
     except KeyboardInterrupt:
         print(f"\n[*] Stopped after {check_num} checks")
 
