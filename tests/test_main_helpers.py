@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from main import _append_monitor_log, _parse_index_selection
+from main import _append_monitor_log, _parse_index_selection, should_run_tui
 
 
 def test_parse_index_selection_supports_comma_separated_indexes():
@@ -33,3 +33,9 @@ def test_append_monitor_log_writes_jsonl_record(tmp_path):
     assert record["course"] == "高级语言程序设计"
     assert record["available"] == 1
     assert record["detail"] == "剩余 1"
+
+
+def test_should_run_tui_accepts_short_and_long_flags():
+    assert should_run_tui(["main.py", "--tui"]) is True
+    assert should_run_tui(["main.py", "-t"]) is True
+    assert should_run_tui(["main.py"]) is False

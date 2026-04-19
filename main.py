@@ -12,6 +12,7 @@ from wzu_scraper.client import WZUClient
 from wzu_scraper.cms import CMSScraper, SITES
 from wzu_scraper.exporters import default_export_path, export_records
 from wzu_scraper.notifier import build_notifier
+from wzu_scraper.tui import run_tui
 
 # Load .env file if present
 _env_path = os.path.join(os.path.dirname(__file__), ".env")
@@ -770,5 +771,12 @@ def main():
                 break
 
 
+def should_run_tui(argv: list[str]) -> bool:
+    return any(arg in {"--tui", "-t"} for arg in argv[1:])
+
+
 if __name__ == "__main__":
-    main()
+    if should_run_tui(sys.argv):
+        run_tui()
+    else:
+        main()
