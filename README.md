@@ -1,14 +1,20 @@
 # WZU Scraper
 
-> 温州大学教务系统爬虫 + 全站搜索引擎
+> 温州大学教务系统爬虫 + 全站搜索引擎 + 抢课工具
 
-一键登录温州大学 CAS 统一认证，查课表、查成绩、搜索 7 个学院网站的通知公告。
+一键登录温州大学 CAS 统一认证，查课表、查成绩、搜索 7 个学院网站的通知公告，选课期间还能自动抢课。
 
 ## 功能
 
 **教务系统**
 - 自动登录 CAS（处理 AES 加密 + OAuth2 跳转，登录一次后自动保存 session）
 - 查课程表、查成绩（支持按学年学期筛选）
+
+**选课/抢课**
+- 搜索可选课程和教学班
+- 一键选课/退课
+- 抢课模式：自动重试 N 次，可设置间隔和最大尝试次数
+- 支持 Ctrl+C 随时中断
 
 **全站搜索**
 - 爬取 7 个学院/部门网站的文章，本地全文搜索
@@ -71,15 +77,18 @@ alias wzu='cd /你的路径/wzu-scraper && uv run python main.py'
 1. Course schedule (课程表)
 2. Grades (成绩)
 3. Student info (个人信息)
-4. Website search (网站搜索)    ← 全站搜索在这里
-5. Session status
+4. Website search (网站搜索)
+5. Course selection (选课/抢课)  ← 抢课在这里
+6. Session status
 0. Exit
 ```
 
-进入「网站搜索」后可以：
-- 输入关键词跨 7 个网站搜索
-- 查看搜索结果的全文内容
-- 爬取最新文章更新本地数据库
+进入「网站搜索」后可以搜索 7 个网站的通知公告并查看全文。
+
+进入「选课/抢课」后可以：
+- 搜索可选课程，查看教学班详情（教师、时间、已选/容量）
+- 选课或退课
+- 开启抢课模式：设置重试次数和间隔，自动疯狂抢课
 
 ### 作为 Python 库使用
 
@@ -107,15 +116,35 @@ with CMSScraper() as s:
         print(f"[{art.date}] {art.title}")
 ```
 
+```python
+# 抢课示例
+from wzu_scraper.client import WZUClient
+
+with WZUClient() as client:
+    client.login_cas("学号", "密码")
+    config = client.get_xk_config()
+
+    if config and config.is_open:
+        courses = client.query_courses(config, "高等数学")
+        if courses:
+            tc = courses[0]  # 选第一个教学班
+            ok, msg, attempts = client.grab_course(
+                config, tc, max_attempts=100, interval=0.3
+            )
+            print(f"{'成功' if ok else '失败'}: {msg} (尝试 {attempts} 次)")
+```
+
 ## 项目结构
 
 ```
 wzu-scraper/
 ├── main.py                  # CLI 入口，交互式菜单
 ├── wzu_scraper/
-│   ├── client.py            # CAS 登录 + 教务系统 API（课表/成绩）
+│   ├── client.py            # CAS 登录 + 教务系统 API（课表/成绩/选课）
 │   ├── crypto.py            # AES-ECB 加密（匹配前端 CryptoJS）
-│   └── cms.py               # 通用 CMS 爬虫（支持 7 个站点 7 种模板）
+│   ├── xk.py                # 选课/抢课模块（逆向自 zzxkYzb.js）
+│   ├── cms.py               # 通用 CMS 爬虫（支持 7 个站点 7 种模板）
+│   └── cms_parsers.py       # CMS 列表页解析器（7 种 HTML 模板）
 ├── docs/
 │   └── technical-analysis.md # 技术分析：登录流程逆向、安全分析、CMS 架构
 ├── .env                     # 账号密码（不进 git）
@@ -130,6 +159,7 @@ wzu-scraper/
 - CAS 单点登录的完整 9 步跳转链
 - AES-ECB 密码加密的逆向分析（以及为什么它形同虚设）
 - 正方教务系统 API 结构（gnmkdm 编码、学期参数等）
+- 选课系统 API 逆向（从 zzxkYzb.js 提取的接口和参数）
 - 博达站群 CMS 的 7 种列表模板格式
 - 安全漏洞分析和日常使用建议
 

@@ -14,6 +14,15 @@ from .jwxt_api import (
     parse_schedule_json,
     parse_student_info_html,
 )
+from .xk import (
+    TeachingClass,
+    XkConfig,
+    cancel_course,
+    get_xk_config,
+    grab_course,
+    query_courses,
+    select_course,
+)
 
 # CAS login base URL (direct, not through WebVPN - jwxt uses source.wzu.edu.cn)
 CAS_BASE = "https://source.wzu.edu.cn"
@@ -227,6 +236,40 @@ class WZUClient:
             return []
 
         return parse_grades_json(data)
+
+    # --- Course Selection (选课) ---
+
+    def get_xk_config(self) -> XkConfig | None:
+        """Get current course selection config and status."""
+        return get_xk_config(self._client)
+
+    def query_courses(
+        self, config: XkConfig, keyword: str = "", page: int = 0
+    ) -> list[TeachingClass]:
+        """Query available courses/teaching classes."""
+        return query_courses(self._client, config, keyword, page)
+
+    def select_course(self, config: XkConfig, tc: TeachingClass) -> tuple[bool, str]:
+        """Select a single course. Returns (success, message)."""
+        return select_course(self._client, config, tc)
+
+    def cancel_course(self, config: XkConfig, tc: TeachingClass) -> tuple[bool, str]:
+        """Cancel a selected course. Returns (success, message)."""
+        return cancel_course(self._client, config, tc)
+
+    def grab_course(
+        self,
+        config: XkConfig,
+        tc: TeachingClass,
+        max_attempts: int = 50,
+        interval: float = 0.3,
+        on_attempt: callable = None,
+    ) -> tuple[bool, str, int]:
+        """Repeatedly try to select a course (抢课).
+
+        Returns (success, message, attempts_used).
+        """
+        return grab_course(self._client, config, tc, max_attempts, interval, on_attempt)
 
     def close(self):
         self._client.close()

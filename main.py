@@ -123,6 +123,173 @@ def cms_menu(scraper: CMSScraper):
             break
 
 
+def xk_menu(client: WZUClient):
+    """Course selection (选课/抢课) sub-menu."""
+    print("\n[*] Loading course selection config...")
+    config = client.get_xk_config()
+    if not config:
+        print("[!] Failed to load selection config")
+        return
+
+    if not config.is_valid:
+        print(f"[!] Selection config unavailable: {config.message or 'invalid config'}")
+        print("    Try refresh later when selection opens.")
+    elif config.is_open:
+        print(f"[+] Selection is OPEN (xkkz_id={config.xkkz_id})")
+    else:
+        print("[!] Selection is NOT open (当前不属于选课阶段)")
+        print("    You can still browse the menu, but selecting will fail.")
+
+    # Cache for searched courses
+    cached_courses: list = []
+
+    while True:
+        print("\n--- Course Selection (选课) ---")
+        print("1. Search courses (搜索课程)")
+        print("2. Select a course (选课)")
+        print("3. GRAB mode - auto retry (抢课模式)")
+        print("4. Cancel a course (退课)")
+        print("5. Refresh config (刷新状态)")
+        print("0. Back")
+
+        choice = input("\nChoice: ").strip()
+
+        if choice == "1":
+            if not config.is_valid:
+                print(f"[!] {config.message or 'Selection config is invalid'}")
+                continue
+            if not config.is_open:
+                print("[!] Selection is not open, query may return nothing")
+            keyword = input("Keyword (课程名/课程号/教师): ").strip()
+            courses = client.query_courses(config, keyword)
+            if not courses:
+                print("No courses found (selection may not be open)")
+                continue
+
+            cached_courses = courses
+            print(f"\n  Found {len(courses)} teaching classes:\n")
+            _print_course_list(courses)
+
+        elif choice == "2":
+            if not config.is_valid:
+                print(f"[!] {config.message or 'Selection config is invalid'}")
+                continue
+            if not config.is_open:
+                print("[!] Selection is not open, cannot select courses")
+                continue
+            if not cached_courses:
+                print("Search for courses first (option 1)")
+                continue
+            _print_course_list(cached_courses)
+            idx = input("\nWhich class to select? (#): ").strip()
+            try:
+                tc = cached_courses[int(idx) - 1]
+                print(f"[*] Selecting: {tc.kcmc} - {tc.jxbmc} ({tc.xm})")
+                ok, msg = client.select_course(config, tc)
+                print(f"[{'+' if ok else '!'}] {msg}")
+            except (ValueError, IndexError):
+                print("Invalid number")
+
+        elif choice == "3":
+            if not config.is_valid:
+                print(f"[!] {config.message or 'Selection config is invalid'}")
+                continue
+            if not config.is_open:
+                print("[!] Selection is not open, cannot grab courses")
+                continue
+            if not cached_courses:
+                print("Search for courses first (option 1)")
+                continue
+            _print_course_list(cached_courses)
+            idx = input("\nWhich class to grab? (#): ").strip()
+            try:
+                tc = cached_courses[int(idx) - 1]
+            except (ValueError, IndexError):
+                print("Invalid number")
+                continue
+
+            attempts_str = input("Max attempts [50]: ").strip()
+            try:
+                max_attempts = int(attempts_str) if attempts_str else 50
+            except ValueError:
+                print("Invalid number, using default 50")
+                max_attempts = 50
+            interval_str = input("Interval seconds [0.3]: ").strip()
+            try:
+                interval = float(interval_str) if interval_str else 0.3
+            except ValueError:
+                print("Invalid number, using default 0.3")
+                interval = 0.3
+
+            print(f"\n[*] GRAB MODE: {tc.kcmc} - {tc.jxbmc}")
+            print(f"    Max attempts: {max_attempts}, interval: {interval}s")
+            print("    Press Ctrl+C to stop\n")
+
+            def on_attempt(n, ok, msg):
+                status = "OK" if ok else "FAIL"
+                print(f"  [{n:>3}/{max_attempts}] {status}: {msg}")
+
+            try:
+                ok, msg, used = client.grab_course(
+                    config, tc, max_attempts, interval, on_attempt
+                )
+                if ok:
+                    print(f"\n[+] SUCCESS after {used} attempts: {msg}")
+                else:
+                    print(f"\n[!] FAILED after {used} attempts: {msg}")
+            except KeyboardInterrupt:
+                print("\n[*] Stopped by user")
+
+        elif choice == "4":
+            if not config.is_valid:
+                print(f"[!] {config.message or 'Selection config is invalid'}")
+                continue
+            if not config.is_open:
+                print("[!] Selection is not open, cannot cancel courses")
+                continue
+            if not cached_courses:
+                print("Search for courses first (option 1)")
+                continue
+            _print_course_list(cached_courses)
+            idx = input("\nWhich class to cancel? (#): ").strip()
+            try:
+                tc = cached_courses[int(idx) - 1]
+                print(f"[*] Canceling: {tc.kcmc} - {tc.jxbmc}")
+                ok, msg = client.cancel_course(config, tc)
+                print(f"[{'+' if ok else '!'}] {msg}")
+            except (ValueError, IndexError):
+                print("Invalid number")
+
+        elif choice == "5":
+            new_config = client.get_xk_config()
+            if new_config:
+                config = new_config
+                if not config.is_valid:
+                    print(
+                        f"[!] Selection config unavailable: {config.message or 'invalid config'}"
+                    )
+                elif config.is_open:
+                    print(f"[+] Selection is OPEN (xkkz_id={config.xkkz_id})")
+                else:
+                    print("[!] Selection is NOT open")
+            else:
+                print("[!] Failed to refresh config")
+
+        elif choice == "0":
+            break
+
+
+def _print_course_list(courses):
+    """Print a numbered list of teaching classes."""
+    for i, tc in enumerate(courses, 1):
+        capacity = f"{tc.yxzrs}/{tc.jxbrl}"
+        print(
+            f"  {i:>3}. {tc.kcmc:<20} {tc.xf}分  "
+            f"{tc.jxbmc:<12} {tc.xm:<8} "
+            f"[{capacity:>7}] {tc.sksj or ''}"
+        )
+
+
 def main():
     with WZUClient() as client:
         # Check if existing session works
@@ -149,7 +316,8 @@ def main():
             print("2. Grades (成绩)")
             print("3. Student info (个人信息)")
             print("4. Website search (网站搜索)")
-            print("5. Session status")
+            print("5. Course selection (选课/抢课)")
+            print("6. Session status")
             print("0. Exit")
 
             choice = input("\nChoice: ").strip()
@@ -194,6 +362,9 @@ def main():
                 cms_menu(scraper)
 
             elif choice == "5":
+                xk_menu(client)
+
+            elif choice == "6":
                 valid = client.check_session()
                 print(f"Session valid: {valid}")
 
