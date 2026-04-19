@@ -163,12 +163,16 @@ class CMSScraper:
                 pass
 
     def _save_db(self, site_key: str):
-        site_articles = [asdict(a) for a in self._articles.values() if a.site == site_key]
+        site_articles = [
+            asdict(a) for a in self._articles.values() if a.site == site_key
+        ]
         self._db_path(site_key).write_text(
             json.dumps(site_articles, ensure_ascii=False, indent=2)
         )
 
-    def _parse_list_page(self, html: str, category_name: str, site: SiteConfig) -> list[Article]:
+    def _parse_list_page(
+        self, html: str, category_name: str, site: SiteConfig
+    ) -> list[Article]:
         """Extract articles from a list page."""
         return [
             Article(
@@ -188,8 +192,13 @@ class CMSScraper:
             return ""
         return extract_article_content(resp.text)
 
-    def crawl(self, site_key: str, category_path: str | None = None,
-              fetch_content: bool = True, max_pages: int = 0) -> int:
+    def crawl(
+        self,
+        site_key: str,
+        category_path: str | None = None,
+        fetch_content: bool = True,
+        max_pages: int = 0,
+    ) -> int:
         """Crawl articles from a site.
 
         Args:
@@ -199,18 +208,28 @@ class CMSScraper:
             max_pages: Max pages per category (0 = all)
         """
         site = SITES[site_key]
-        cats = {category_path: site.categories[category_path]} if category_path else site.categories
+        cats = (
+            {category_path: site.categories[category_path]}
+            if category_path
+            else site.categories
+        )
         total_new = 0
 
         for path, cat_name in cats.items():
-            logger.info("Crawling CMS category", extra={"site": site.name, "category": cat_name})
+            logger.info(
+                "Crawling CMS category", extra={"site": site.name, "category": cat_name}
+            )
             new_count = 0
 
             resp = self._client.get(f"{site.base_url}/{path}.htm")
             if resp.status_code != 200:
                 logger.warning(
                     "Failed to fetch CMS list page",
-                    extra={"site": site.name, "category": cat_name, "status_code": resp.status_code},
+                    extra={
+                        "site": site.name,
+                        "category": cat_name,
+                        "status_code": resp.status_code,
+                    },
                 )
                 continue
 
@@ -218,7 +237,7 @@ class CMSScraper:
 
             # Find total pages
             page_name = path.split("/")[-1]
-            page_nums = re.findall(rf'{page_name}/(\d+)\.htm', resp.text)
+            page_nums = re.findall(rf"{page_name}/(\d+)\.htm", resp.text)
             total_pages = max(int(p) for p in page_nums) if page_nums else 0
 
             # Process current page
@@ -261,7 +280,9 @@ class CMSScraper:
         self._save_db(site_key)
         return total_new
 
-    def search(self, keyword: str, site_key: str | None = None, limit: int = 20) -> list[Article]:
+    def search(
+        self, keyword: str, site_key: str | None = None, limit: int = 20
+    ) -> list[Article]:
         """Search articles by keyword. Optionally filter by site."""
         kw = keyword.lower()
         results = []
@@ -273,9 +294,13 @@ class CMSScraper:
         results.sort(key=lambda a: a.date, reverse=True)
         return results[:limit]
 
-    def list_recent(self, site_key: str | None = None, limit: int = 20) -> list[Article]:
+    def list_recent(
+        self, site_key: str | None = None, limit: int = 20
+    ) -> list[Article]:
         """List recent articles. Optionally filter by site."""
-        arts = [a for a in self._articles.values() if not site_key or a.site == site_key]
+        arts = [
+            a for a in self._articles.values() if not site_key or a.site == site_key
+        ]
         arts.sort(key=lambda a: a.date, reverse=True)
         return arts[:limit]
 

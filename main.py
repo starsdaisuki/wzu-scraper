@@ -23,7 +23,9 @@ def _show_article(art):
     """Display full article content."""
     print(f"\n{'=' * 60}")
     print(f"  {art.title}")
-    print(f"  {art.date}  |  {art.category}  |  {SITES.get(art.site, art).name if art.site in SITES else art.site}")
+    print(
+        f"  {art.date}  |  {art.category}  |  {SITES.get(art.site, art).name if art.site in SITES else art.site}"
+    )
     print(f"  {art.url}")
     print(f"{'=' * 60}")
     if art.content:
@@ -86,7 +88,9 @@ def cms_menu(scraper: CMSScraper):
             if not keyword:
                 continue
             results = scraper.search(keyword)
-            _show_article_list(results, f"Found {len(results)} results for '{keyword}':")
+            _show_article_list(
+                results, f"Found {len(results)} results for '{keyword}':"
+            )
 
         elif choice == "2":
             articles = scraper.list_recent(limit=20)
@@ -126,8 +130,12 @@ def main():
             print("[+] Existing session is valid, skipping login")
         else:
             print("[*] Need to login")
-            username = os.environ.get("WZU_USERNAME") or input("Student ID (学号): ").strip()
-            password = os.environ.get("WZU_PASSWORD") or getpass.getpass("Password (密码): ")
+            username = (
+                os.environ.get("WZU_USERNAME") or input("Student ID (学号): ").strip()
+            )
+            password = os.environ.get("WZU_PASSWORD") or getpass.getpass(
+                "Password (密码): "
+            )
             if not client.login_cas(username, password):
                 print("[!] Login failed, exiting")
                 sys.exit(1)
@@ -151,10 +159,14 @@ def main():
                 sem = input("Semester (1=fall, 2=spring): ").strip() or "2"
                 courses = client.get_course_schedule(year, sem)
                 if courses:
-                    print(f"\n{'Course':<30} {'Teacher':<10} {'Location':<15} {'Day':<6} {'Period':<8} {'Weeks':<15}")
+                    print(
+                        f"\n{'Course':<30} {'Teacher':<10} {'Location':<15} {'Day':<6} {'Period':<8} {'Weeks':<15}"
+                    )
                     print("-" * 90)
                     for c in courses:
-                        print(f"{c['name']:<30} {c['teacher']:<10} {c['location']:<15} {c['weekday']:<6} {c['periods']:<8} {c['weeks']:<15}")
+                        print(
+                            f"{c['name']:<30} {c['teacher']:<10} {c['location']:<15} {c['weekday']:<6} {c['periods']:<8} {c['weeks']:<15}"
+                        )
                 else:
                     print("No courses found")
 
@@ -163,10 +175,14 @@ def main():
                 sem = input("Semester (1=fall, 2=spring, empty=all): ").strip() or ""
                 grades = client.get_grades(year, sem)
                 if grades:
-                    print(f"\n{'Course':<35} {'Grade':<8} {'GPA':<6} {'Credit':<8} {'Category':<15}")
+                    print(
+                        f"\n{'Course':<35} {'Grade':<8} {'GPA':<6} {'Credit':<8} {'Category':<15}"
+                    )
                     print("-" * 80)
                     for g in grades:
-                        print(f"{g['name']:<35} {g['grade']:<8} {g['gpa_point']:<6} {g['credit']:<8} {g['category']:<15}")
+                        print(
+                            f"{g['name']:<35} {g['grade']:<8} {g['gpa_point']:<6} {g['credit']:<8} {g['category']:<15}"
+                        )
                 else:
                     print("No grades found")
 

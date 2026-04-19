@@ -61,8 +61,10 @@ class WZUClient:
                 cookie_list = json.loads(COOKIE_FILE.read_text())
                 for c in cookie_list:
                     self._client.cookies.set(
-                        c["name"], c["value"],
-                        domain=c.get("domain", ""), path=c.get("path", "/"),
+                        c["name"],
+                        c["value"],
+                        domain=c.get("domain", ""),
+                        path=c.get("path", "/"),
                     )
             except (json.JSONDecodeError, KeyError):
                 pass
@@ -157,7 +159,9 @@ class WZUClient:
         info = parse_student_info_html(resp.text)
         return info if info else {"raw_length": len(resp.text), "url": str(resp.url)}
 
-    def get_course_schedule(self, school_year: str = "2025-2026", semester: str = "2") -> list[dict]:
+    def get_course_schedule(
+        self, school_year: str = "2025-2026", semester: str = "2"
+    ) -> list[dict]:
         """Fetch course schedule (课程表).
 
         Args:
@@ -172,7 +176,9 @@ class WZUClient:
         )
 
         if resp.status_code != 200:
-            logger.warning("Failed to fetch schedule", extra={"status_code": resp.status_code})
+            logger.warning(
+                "Failed to fetch schedule", extra={"status_code": resp.status_code}
+            )
             return []
 
         try:
@@ -183,7 +189,9 @@ class WZUClient:
 
         return parse_schedule_json(data)
 
-    def get_grades(self, school_year: str = "2025-2026", semester: str = "2") -> list[dict]:
+    def get_grades(
+        self, school_year: str = "2025-2026", semester: str = "2"
+    ) -> list[dict]:
         """Fetch grades (成绩).
 
         Args:
@@ -198,7 +206,9 @@ class WZUClient:
         )
 
         if resp.status_code != 200:
-            logger.warning("Failed to fetch grades", extra={"status_code": resp.status_code})
+            logger.warning(
+                "Failed to fetch grades", extra={"status_code": resp.status_code}
+            )
             return []
 
         try:

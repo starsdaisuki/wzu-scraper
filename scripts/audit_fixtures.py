@@ -11,7 +11,9 @@ FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 DENY_PATTERNS = {
     "student_id": re.compile(r"\b\d{11}\b"),
     "password_field": re.compile(r"password=", re.IGNORECASE),
-    "cookie_name": re.compile(r"\b(?:SOURCEID_TGC|JSESSIONID|SESSION)\b", re.IGNORECASE),
+    "cookie_name": re.compile(
+        r"\b(?:SOURCEID_TGC|JSESSIONID|SESSION)\b", re.IGNORECASE
+    ),
     "cookie_header": re.compile(r"\bSet-Cookie\b", re.IGNORECASE),
     "ticket": re.compile(r"ticket=ST-", re.IGNORECASE),
     "uid_query": re.compile(r"uid=\d{8,}", re.IGNORECASE),
