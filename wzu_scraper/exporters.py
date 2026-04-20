@@ -84,6 +84,9 @@ def export_records(
     context: dict[str, str] | None = None,
 ) -> Path:
     """Export normalized records in the requested format."""
+    if path.exists() and path.is_dir():
+        raise ValueError(f"Output path is a directory: {path}")
+
     path.parent.mkdir(parents=True, exist_ok=True)
 
     if fmt == "json":

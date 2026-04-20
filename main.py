@@ -3,9 +3,10 @@
 import getpass
 import json
 import os
+import re
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from wzu_scraper.client import WZUClient
@@ -23,6 +24,171 @@ if os.path.exists(_env_path):
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
                 os.environ.setdefault(k.strip(), v.strip())
+
+
+def _prompt_text(prompt: str, default: str | None = None) -> str:
+    """Prompt for text with an optional default."""
+    raw = input(prompt).strip()
+    if raw:
+        return raw
+    return default or ""
+
+
+def _prompt_choice(
+    prompt: str,
+    valid_choices: set[str],
+    *,
+    default: str | None = None,
+    allow_blank: bool = False,
+    invalid_message: str = "Invalid choice, try again.",
+) -> str:
+    """Prompt until the user enters a valid choice."""
+    while True:
+        value = input(prompt).strip().lower()
+        if not value:
+            if allow_blank:
+                return ""
+            if default is not None:
+                return default
+        elif value in valid_choices:
+            return value
+        print(invalid_message)
+
+
+def _prompt_int(
+    prompt: str,
+    *,
+    default: int,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    """Prompt for an integer with range validation."""
+    while True:
+        raw = input(prompt).strip()
+        if not raw:
+            return default
+        try:
+            value = int(raw)
+        except ValueError:
+            print(
+                f"Invalid number, using digits only. Press Enter for default {default}."
+            )
+            continue
+        if minimum is not None and value < minimum:
+            print(f"Value must be >= {minimum}.")
+            continue
+        if maximum is not None and value > maximum:
+            print(f"Value must be <= {maximum}.")
+            continue
+        return value
+
+
+def _prompt_float(
+    prompt: str,
+    *,
+    default: float,
+    minimum: float | None = None,
+) -> float:
+    """Prompt for a float with simple lower-bound validation."""
+    while True:
+        raw = input(prompt).strip()
+        if not raw:
+            return default
+        try:
+            value = float(raw)
+        except ValueError:
+            print(f"Invalid number, press Enter for default {default}.")
+            continue
+        if minimum is not None and value < minimum:
+            print(f"Value must be >= {minimum}.")
+            continue
+        return value
+
+
+def _prompt_yes_no(prompt: str, *, default: bool) -> bool:
+    """Prompt for y/n and keep asking until the answer is clear."""
+    default_hint = "y" if default else "n"
+    while True:
+        raw = input(prompt).strip().lower()
+        if not raw:
+            return default
+        if raw in {"y", "yes"}:
+            return True
+        if raw in {"n", "no"}:
+            return False
+        print(f"Please enter y or n. Press Enter for default {default_hint}.")
+
+
+def _normalize_school_year_input(raw: str) -> str | None:
+    """Accept YYYY or YYYY-YYYY and normalize to academic-year format."""
+    value = raw.strip()
+    if not value:
+        return None
+    if re.fullmatch(r"\d{4}", value):
+        start_year = int(value)
+        return f"{start_year}-{start_year + 1}"
+    if re.fullmatch(r"\d{4}-\d{4}", value):
+        start_raw, end_raw = value.split("-", 1)
+        start_year = int(start_raw)
+        end_year = int(end_raw)
+        if end_year - start_year == 1:
+            return value
+    return None
+
+
+def _prompt_school_year(prompt: str, *, default: str | None = None) -> str:
+    """Prompt for school year and allow shorthand like 2025 -> 2025-2026."""
+    while True:
+        raw = input(prompt).strip()
+        if not raw:
+            return default or ""
+        normalized = _normalize_school_year_input(raw)
+        if normalized:
+            return normalized
+        print("Invalid school year. Use YYYY or YYYY-YYYY, e.g. 2025 or 2025-2026.")
+
+
+def _prompt_semester(
+    prompt: str, *, default: str | None = None, allow_blank: bool = False
+) -> str:
+    """Prompt for semester code 1/2."""
+    while True:
+        raw = input(prompt).strip()
+        if not raw:
+            if allow_blank:
+                return ""
+            return default or ""
+        if raw in {"1", "2"}:
+            return raw
+        print("Invalid semester. Enter 1 or 2.")
+
+
+def _prompt_index(items, prompt: str) -> int | None:
+    """Prompt for a 1-based list index; Enter cancels."""
+    while True:
+        raw = input(prompt).strip()
+        if not raw:
+            return None
+        try:
+            index = int(raw) - 1
+        except ValueError:
+            print("Invalid number, try again.")
+            continue
+        if 0 <= index < len(items):
+            return index
+        print(f"Please enter a number between 1 and {len(items)}.")
+
+
+def _prompt_multi_indexes(items, prompt: str):
+    """Prompt for one or more comma-separated list indexes; Enter cancels."""
+    while True:
+        raw = input(prompt).strip()
+        if not raw:
+            return []
+        selected = _parse_index_selection(items, raw)
+        if selected:
+            return selected
+        print("Invalid selection. Use numbers like 1 or 1,3,5.")
 
 
 def _show_article(art):
@@ -69,7 +235,7 @@ def _show_article_list(articles, label=""):
             else:
                 print("  Invalid number")
         except ValueError:
-            break
+            print("  Invalid number")
 
 
 def cms_menu(scraper: CMSScraper):
@@ -87,10 +253,13 @@ def cms_menu(scraper: CMSScraper):
         print("4. Crawl all sites")
         print("0. Back")
 
-        choice = input("\nChoice: ").strip()
+        choice = _prompt_choice(
+            "\nChoice: ",
+            {"0", "1", "2", "3", "4"},
+        )
 
         if choice == "1":
-            keyword = input("Keyword: ").strip()
+            keyword = _prompt_text("Keyword: ")
             if not keyword:
                 continue
             results = scraper.search(keyword)
@@ -108,15 +277,15 @@ def cms_menu(scraper: CMSScraper):
             for i, key in enumerate(site_keys, 1):
                 count = scraper.stats().get(key, 0)
                 print(f"  {i}. {SITES[key].name} ({count} articles)")
-            idx = input("Which? ").strip()
-            try:
-                site_key = site_keys[int(idx) - 1]
-                mp = input("Max pages per category [5]: ").strip()
-                max_pages = int(mp) if mp else 5
-                new = scraper.crawl(site_key, max_pages=max_pages)
-                print(f"[+] Done! {new} new, {scraper.total_articles} total")
-            except (ValueError, IndexError):
-                print("Invalid choice")
+            idx = _prompt_index(site_keys, "Which? [Enter cancel]: ")
+            if idx is None:
+                continue
+            site_key = site_keys[idx]
+            max_pages = _prompt_int(
+                "Max pages per category [5]: ", default=5, minimum=1
+            )
+            new = scraper.crawl(site_key, max_pages=max_pages)
+            print(f"[+] Done! {new} new, {scraper.total_articles} total")
 
         elif choice == "4":
             print("[*] Crawling all sites...")
@@ -160,7 +329,10 @@ def xk_menu(client: WZUClient):
         print("6. Refresh config (刷新状态)")
         print("0. Back")
 
-        choice = input("\nChoice: ").strip()
+        choice = _prompt_choice(
+            "\nChoice: ",
+            {"0", "1", "2", "3", "4", "5", "6"},
+        )
 
         if choice == "1":
             if not config.is_valid:
@@ -168,7 +340,7 @@ def xk_menu(client: WZUClient):
                 continue
             if not config.is_open:
                 print("[!] Selection is not open, query may return nothing")
-            keyword = input("Keyword (课程名/课程号/教师): ").strip()
+            keyword = _prompt_text("Keyword (课程名/课程号/教师): ")
             courses = client.query_courses(config, keyword)
             if not courses:
                 print("No courses found (selection may not be open)")
@@ -201,14 +373,15 @@ def xk_menu(client: WZUClient):
                 print("Search for courses first (option 1)")
                 continue
             _print_course_list(cached_courses)
-            idx = input("\nWhich class to select? (#): ").strip()
-            try:
-                tc = cached_courses[int(idx) - 1]
-                print(f"[*] Selecting: {tc.kcmc} - {tc.jxbmc} ({tc.xm})")
-                ok, msg = client.select_course(config, tc)
-                print(f"[{'+' if ok else '!'}] {msg}")
-            except (ValueError, IndexError):
-                print("Invalid number")
+            idx = _prompt_index(
+                cached_courses, "\nWhich class to select? (#, Enter cancel): "
+            )
+            if idx is None:
+                continue
+            tc = cached_courses[idx]
+            print(f"[*] Selecting: {tc.kcmc} - {tc.jxbmc} ({tc.xm})")
+            ok, msg = client.select_course(config, tc)
+            print(f"[{'+' if ok else '!'}] {msg}")
 
         elif choice == "4":
             if not config.is_valid:
@@ -221,35 +394,28 @@ def xk_menu(client: WZUClient):
                 print("Search for courses first (option 1)")
                 continue
             _print_course_list(cached_courses)
-            idx = input("\nWhich class to grab? (#): ").strip()
-            try:
-                tc = cached_courses[int(idx) - 1]
-            except (ValueError, IndexError):
-                print("Invalid number")
+            idx = _prompt_index(
+                cached_courses, "\nWhich class to grab? (#, Enter cancel): "
+            )
+            if idx is None:
                 continue
+            tc = cached_courses[idx]
 
-            attempts_str = input("Max attempts [50]: ").strip()
-            try:
-                max_attempts = int(attempts_str) if attempts_str else 50
-            except ValueError:
-                print("Invalid number, using default 50")
-                max_attempts = 50
-            interval_str = input("Interval seconds [0.3]: ").strip()
-            try:
-                interval = float(interval_str) if interval_str else 0.3
-            except ValueError:
-                print("Invalid number, using default 0.3")
-                interval = 0.3
-            jitter_str = input("Random jitter seconds [0.1]: ").strip()
-            try:
-                jitter = float(jitter_str) if jitter_str else 0.1
-            except ValueError:
-                print("Invalid number, using default 0.1")
-                jitter = 0.1
-            start_str = input("Start at HH:MM[:SS] [now]: ").strip()
-            start_at = _parse_start_time_input(start_str)
-            if start_str and start_at is None:
-                print("Invalid time format, starting immediately")
+            max_attempts = _prompt_int("Max attempts [50]: ", default=50, minimum=1)
+            interval = _prompt_float(
+                "Interval seconds [0.3]: ", default=0.3, minimum=0.0
+            )
+            jitter = _prompt_float(
+                "Random jitter seconds [0.1]: ", default=0.1, minimum=0.0
+            )
+            while True:
+                start_str = _prompt_text("Start at HH:MM[:SS] [now]: ")
+                start_at = _parse_start_time_input(start_str)
+                if not start_str or start_at is not None:
+                    break
+                print(
+                    "Invalid time format. Use HH:MM or HH:MM:SS, or press Enter for now."
+                )
 
             print(f"\n[*] GRAB MODE: {tc.kcmc} - {tc.jxbmc}")
             print(
@@ -295,14 +461,16 @@ def xk_menu(client: WZUClient):
                 print("No selected courses found")
                 continue
             _print_selected_course_list(cached_selected)
-            idx = input("\nWhich selected class to cancel? (#): ").strip()
-            try:
-                tc = cached_selected[int(idx) - 1]
-                print(f"[*] Canceling: {tc.course_name} - {tc.class_name}")
-                ok, msg = client.cancel_course(config, tc)
-                print(f"[{'+' if ok else '!'}] {msg}")
-            except (ValueError, IndexError):
-                print("Invalid number")
+            idx = _prompt_index(
+                cached_selected,
+                "\nWhich selected class to cancel? (#, Enter cancel): ",
+            )
+            if idx is None:
+                continue
+            tc = cached_selected[idx]
+            print(f"[*] Canceling: {tc.course_name} - {tc.class_name}")
+            ok, msg = client.cancel_course(config, tc)
+            print(f"[{'+' if ok else '!'}] {msg}")
 
         elif choice == "6":
             new_config = client.get_xk_config()
@@ -429,21 +597,51 @@ def _parse_start_time_input(value: str) -> float | None:
 
 def _configure_monitor_notifier():
     """Prompt for optional vacancy notification backends."""
-    bell = input("Bell notification? (y/n) [y]: ").strip().lower()
-    desktop = input("Desktop notification? (y/n) [y]: ").strip().lower()
-    telegram = input("Telegram notification? (y/n) [n]: ").strip().lower()
-    wants_telegram = telegram == "y"
+    bell = _prompt_yes_no("Bell notification? (y/n) [y]: ", default=True)
+    desktop = _prompt_yes_no("Desktop notification? (y/n) [y]: ", default=True)
+    wants_telegram = _prompt_yes_no(
+        "Telegram notification? (y/n) [n]: ",
+        default=False,
+    )
     if wants_telegram and not (
         os.environ.get("WZU_TELEGRAM_BOT_TOKEN")
         and os.environ.get("WZU_TELEGRAM_CHAT_ID")
     ):
         print("[!] Telegram env vars missing, skipping Telegram notifier")
     notifier = build_notifier(
-        bell=bell != "n",
-        desktop=desktop != "n",
+        bell=bell,
+        desktop=desktop,
         telegram=wants_telegram,
     )
     return notifier
+
+
+def _resolve_export_output_path(path_input: str, default_path: Path) -> Path:
+    """Resolve an export target, treating existing directories as output folders."""
+    if not path_input:
+        return default_path
+
+    candidate = Path(path_input).expanduser()
+    if candidate.exists() and candidate.is_dir():
+        return candidate / default_path.name
+
+    return candidate
+
+
+def _normalize_iso_date_input(raw: str) -> str | None:
+    """Accept YYYY-M-D or YYYY-MM-DD and normalize to ISO format."""
+    match = re.fullmatch(r"\s*(\d{4})-(\d{1,2})-(\d{1,2})\s*", raw)
+    if not match:
+        return None
+
+    try:
+        return date(
+            int(match.group(1)),
+            int(match.group(2)),
+            int(match.group(3)),
+        ).isoformat()
+    except ValueError:
+        return None
 
 
 def _maybe_export_records(kind: str, records: list[dict[str, str]]) -> None:
@@ -455,28 +653,27 @@ def _maybe_export_records(kind: str, records: list[dict[str, str]]) -> None:
     if kind in {"exams", "schedule"}:
         allowed_formats.append("ics")
 
-    choice = (
-        input(f"Export {kind}? [{'/'.join(allowed_formats)}/Enter skip]: ")
-        .strip()
-        .lower()
+    choice = _prompt_choice(
+        f"Export {kind}? [{'/'.join(allowed_formats)}/Enter skip]: ",
+        set(allowed_formats),
+        allow_blank=True,
+        invalid_message=f"Invalid format. Choose one of: {', '.join(allowed_formats)}.",
     )
     if not choice:
-        return
-    if choice not in allowed_formats:
-        print("Invalid format, skipping export")
         return
 
     default_path = default_export_path(kind, choice)
     path_input = input(f"Output path [{default_path}]: ").strip()
-    output_path = Path(path_input) if path_input else default_path
+    output_path = _resolve_export_output_path(path_input, default_path)
     export_context = None
     if kind == "schedule" and choice == "ics":
-        week1_monday = input("Week 1 Monday date [YYYY-MM-DD]: ").strip()
-        try:
-            datetime.strptime(week1_monday, "%Y-%m-%d")
-        except ValueError:
-            print("[!] Invalid date, skipping export")
-            return
+        while True:
+            week1_monday = _normalize_iso_date_input(
+                input("Week 1 Monday date [YYYY-MM-DD]: ").strip()
+            )
+            if week1_monday:
+                break
+            print("Invalid date. Use YYYY-MM-DD, e.g. 2026-02-23.")
         summary_prefix = input("Schedule title prefix [课表]: ").strip() or "课表"
         category = input("Calendar category tag [课程]: ").strip() or "课程"
         calendar_color = input("Calendar color hex [skip]: ").strip()
@@ -489,8 +686,14 @@ def _maybe_export_records(kind: str, records: list[dict[str, str]]) -> None:
         }
 
     try:
-        export_records(kind, records, choice, output_path, context=export_context)
-    except ValueError as exc:
+        output_path = export_records(
+            kind,
+            records,
+            choice,
+            output_path,
+            context=export_context,
+        )
+    except (OSError, ValueError) as exc:
         print(f"[!] Export failed: {exc}")
         return
 
@@ -516,54 +719,54 @@ def monitor_menu(client: WZUClient):
 
     print("[+] Selection is open, ready to monitor")
     print("\nFirst, search for the course you want to monitor.")
-    keyword = input("Keyword (课程名/课程号/教师): ").strip()
+    keyword = _prompt_text("Keyword (课程名/课程号/教师): ")
     courses = client.query_courses(config, keyword)
     if not courses:
         print("No courses found")
         return
 
     _print_course_list(courses)
-    idx = input("\nWhich classes to monitor? (# or 1,3,5): ").strip()
-    targets = _parse_index_selection(courses, idx)
+    targets = _prompt_multi_indexes(
+        courses, "\nWhich classes to monitor? (# or 1,3,5, Enter cancel): "
+    )
     if not targets:
-        print("Invalid selection")
+        print("Monitor cancelled")
         return
 
-    interval_str = input("Check interval seconds [10]: ").strip()
-    try:
-        interval = float(interval_str) if interval_str else 10.0
-    except ValueError:
-        interval = 10.0
+    interval = _prompt_float("Check interval seconds [10]: ", default=10.0, minimum=0.1)
 
-    auto_grab = input("Auto-grab when available? (y/n) [n]: ").strip().lower() == "y"
+    auto_grab = _prompt_yes_no("Auto-grab when available? (y/n) [n]: ", default=False)
     notifier = _configure_monitor_notifier()
     log_path = default_export_path("course-monitor", "jsonl")
-    log_choice = input(f"Write monitor log? (y/n) [y], path [{log_path}]: ").strip()
-    if log_choice.lower() == "n":
+    wants_log = _prompt_yes_no(
+        f"Write monitor log? (y/n) [y], path [{log_path}]: ",
+        default=True,
+    )
+    if not wants_log:
         log_path = None
     else:
-        custom_log = input("Log path override [Enter keep default]: ").strip()
+        custom_log = _prompt_text("Log path override [Enter keep default]: ")
         if custom_log:
-            log_path = Path(custom_log)
+            log_path = _resolve_export_output_path(custom_log, log_path)
     grab_attempts = 1
     grab_interval = 0.3
     grab_jitter = 0.1
     if auto_grab:
-        attempts_str = input("Auto-grab attempts per vacancy [8]: ").strip()
-        try:
-            grab_attempts = int(attempts_str) if attempts_str else 8
-        except ValueError:
-            grab_attempts = 8
-        retry_interval = input("Auto-grab retry interval [0.3]: ").strip()
-        try:
-            grab_interval = float(retry_interval) if retry_interval else 0.3
-        except ValueError:
-            grab_interval = 0.3
-        jitter_str = input("Auto-grab jitter seconds [0.1]: ").strip()
-        try:
-            grab_jitter = float(jitter_str) if jitter_str else 0.1
-        except ValueError:
-            grab_jitter = 0.1
+        grab_attempts = _prompt_int(
+            "Auto-grab attempts per vacancy [8]: ",
+            default=8,
+            minimum=1,
+        )
+        grab_interval = _prompt_float(
+            "Auto-grab retry interval [0.3]: ",
+            default=0.3,
+            minimum=0.0,
+        )
+        grab_jitter = _prompt_float(
+            "Auto-grab jitter seconds [0.1]: ",
+            default=0.1,
+            minimum=0.0,
+        )
 
     print(f"\n[*] Monitoring {len(targets)} class(es):")
     for tc in targets:
@@ -577,9 +780,9 @@ def monitor_menu(client: WZUClient):
 
     check_num = 0
     last_available: dict[str, int | None] = {tc.jxb_id: None for tc in targets}
-    zero_to_open_only = (
-        input("Notify only on 0 -> vacancy transitions? (y/n) [y]: ").strip().lower()
-        != "n"
+    zero_to_open_only = _prompt_yes_no(
+        "Notify only on 0 -> vacancy transitions? (y/n) [y]: ",
+        default=True,
     )
     try:
         while True:
@@ -671,8 +874,8 @@ def main():
             print("[+] Existing session is valid, skipping login")
         else:
             print("[*] Need to login")
-            username = (
-                os.environ.get("WZU_USERNAME") or input("Student ID (学号): ").strip()
+            username = os.environ.get("WZU_USERNAME") or _prompt_text(
+                "Student ID (学号): "
             )
             password = os.environ.get("WZU_PASSWORD") or getpass.getpass(
                 "Password (密码): "
@@ -696,11 +899,20 @@ def main():
             print("8. Session status")
             print("0. Exit")
 
-            choice = input("\nChoice: ").strip()
+            choice = _prompt_choice(
+                "\nChoice: ",
+                {"0", "1", "2", "3", "4", "5", "6", "7", "8"},
+            )
 
             if choice == "1":
-                year = input("School year (e.g. 2025-2026): ").strip() or "2025-2026"
-                sem = input("Semester (1=fall, 2=spring): ").strip() or "2"
+                year = _prompt_school_year(
+                    "School year (e.g. 2025-2026 or 2025) [2025-2026]: ",
+                    default="2025-2026",
+                )
+                sem = _prompt_semester(
+                    "Semester (1=fall, 2=spring) [2]: ",
+                    default="2",
+                )
                 courses = client.get_course_schedule(year, sem)
                 if courses:
                     print(
@@ -716,8 +928,14 @@ def main():
                 _maybe_export_records("schedule", courses)
 
             elif choice == "2":
-                year = input("School year (e.g. 2025-2026, empty=all): ").strip() or ""
-                sem = input("Semester (1=fall, 2=spring, empty=all): ").strip() or ""
+                year = _prompt_school_year(
+                    "School year (e.g. 2025-2026 or 2025, Enter=all): ",
+                    default="",
+                )
+                sem = _prompt_semester(
+                    "Semester (1=fall, 2=spring, Enter=all): ",
+                    allow_blank=True,
+                )
                 grades = client.get_grades(year, sem)
                 if grades:
                     print(
@@ -733,8 +951,14 @@ def main():
                 _maybe_export_records("grades", grades)
 
             elif choice == "3":
-                year = input("School year (e.g. 2025-2026): ").strip() or "2025-2026"
-                sem = input("Semester (1=fall, 2=spring): ").strip() or "1"
+                year = _prompt_school_year(
+                    "School year (e.g. 2025-2026 or 2025) [2025-2026]: ",
+                    default="2025-2026",
+                )
+                sem = _prompt_semester(
+                    "Semester (1=fall, 2=spring) [1]: ",
+                    default="1",
+                )
                 exams = client.get_exams(year, sem)
                 if exams:
                     print(f"\n  Found {len(exams)} exams:\n")

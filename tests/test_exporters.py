@@ -39,6 +39,17 @@ def test_export_records_writes_csv(tmp_path) -> None:
     assert "grade" in text
 
 
+def test_export_records_rejects_directory_output_path(tmp_path) -> None:
+    rows = [{"name": "高等数学A(一)", "teacher": "教师甲"}]
+
+    try:
+        export_records("schedule", rows, "json", tmp_path)
+    except ValueError as exc:
+        assert "directory" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for directory output path")
+
+
 def test_export_records_writes_json(tmp_path) -> None:
     path = tmp_path / "schedule.json"
     rows = [{"name": "高等数学A(一)", "teacher": "教师甲"}]
