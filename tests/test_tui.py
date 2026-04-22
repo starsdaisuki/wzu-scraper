@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from wzu_scraper.tui import (
     TUIState,
@@ -9,6 +10,32 @@ from wzu_scraper.tui import (
     export_payload_for_section,
     render_section_lines,
 )
+
+
+def test_prompt_survives_narrow_terminal():
+    """Prompt width calculation must never produce negative args to curses."""
+    stdscr = MagicMock()
+    stdscr.getmaxyx.return_value = (10, 10)  # very narrow
+    window = MagicMock()
+    window.getstr.return_value = b""
+
+    tui = WZUTUI(stdscr, MagicMock())
+    with (
+        patch("wzu_scraper.tui.curses.newwin", return_value=window) as new_win,
+        patch("wzu_scraper.tui.curses.echo"),
+        patch("wzu_scraper.tui.curses.noecho"),
+        patch("wzu_scraper.tui.curses.curs_set"),
+    ):
+        tui.prompt("this is a very long label", "and a long default")
+
+    # Window width must be at least 20 regardless of terminal size.
+    args, _ = new_win.call_args
+    _, win_width, _, _ = args
+    assert win_width >= 20
+
+    # getstr must receive non-negative coordinates and a positive length.
+    (row, col, length), _ = window.getstr.call_args_list[0]
+    assert row >= 0 and col >= 0 and length >= 1
 
 
 def test_render_section_lines_for_schedule_contains_course_data():

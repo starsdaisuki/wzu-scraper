@@ -474,15 +474,20 @@ class WZUTUI:
 
     def prompt(self, label: str, default: str) -> str | None:
         height, width = self.stdscr.getmaxyx()
-        window = curses.newwin(3, width - 4, height - 4, 2)
+        win_width = max(20, width - 4)
+        window = curses.newwin(3, win_width, max(0, height - 4), 2)
         window.border()
-        window.addstr(1, 2, f"{label} [{default}]: ")
+        header = f"{label} [{default}]: "
+        # Truncate header if it would overflow the prompt window.
+        if len(header) > win_width - 4:
+            header = header[: max(0, win_width - 4)]
+        window.addstr(1, 2, header)
         window.refresh()
         curses.echo()
         curses.curs_set(1)
-        raw = window.getstr(
-            1, len(label) + len(default) + 6, width - len(label) - len(default) - 12
-        )
+        input_col = 2 + len(header)
+        max_input = max(1, win_width - input_col - 2)
+        raw = window.getstr(1, input_col, max_input)
         curses.noecho()
         curses.curs_set(0)
         value = raw.decode("utf-8").strip()
