@@ -250,8 +250,8 @@ class CMSScraper:
                     self._articles[key] = art
                     new_count += 1
 
-            # Crawl remaining pages
-            pages = range(total_pages, 0, -1)
+            # Crawl remaining pages (page/1.htm is newest after the default listing)
+            pages = range(1, total_pages + 1)
             if max_pages > 0:
                 pages = list(pages)[:max_pages]
 

@@ -115,8 +115,10 @@ def get_selected_classes(client: httpx.Client) -> list[SelectedClass]:
     """Fetch the selected teaching classes shown in the right-side panel."""
     resp = client.get(f"{JWXT_BASE}/jwglxt/xsxk/zzxkyzb_cxZzxkYzbChoosed.html")
     if resp.status_code != 200:
-        logger.warning(
-            "Failed to load selected classes panel",
+        # HTTP 500 with a maintenance page is normal outside the selection period.
+        log_fn = logger.debug if resp.status_code == 500 else logger.warning
+        log_fn(
+            "Selected classes panel unavailable",
             extra={"status": resp.status_code},
         )
         return []
