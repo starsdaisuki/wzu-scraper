@@ -80,3 +80,9 @@ def test_parse_list_page_routes_to_jsp_style() -> None:
 def test_extract_article_content() -> None:
     content = extract_article_content(read_fixture("cms", "article_content.html"))
     assert content == "第一段内容。 第二段内容。"
+
+
+def test_extract_article_content_handles_single_quoted_class() -> None:
+    """联奕 JSP articles wrap the body with single-quoted class attributes."""
+    html = "<div class='v_news_content'><p>单引号正文内容</p></div>"
+    assert extract_article_content(html) == "单引号正文内容"

@@ -269,8 +269,13 @@ def _print_student_info(info: dict | None) -> None:
             print(f"  {key:<6}: {value}")
 
 
-def _show_article(art):
-    """Display full article content."""
+def _show_article(art, scraper=None):
+    """Display full article content.
+
+    If ``art.content`` is empty and a ``scraper`` is provided, try to fetch
+    the body on demand (and persist it).  This covers JSP articles (only
+    accessible via WebVPN) and any article indexed with ``fetch_content=False``.
+    """
     print(f"\n{'=' * 60}")
     print(f"  {art.title}")
     print(
@@ -278,15 +283,17 @@ def _show_article(art):
     )
     print(f"  {art.url}")
     print(f"{'=' * 60}")
+
+    if not art.content and scraper is not None:
+        print("  [*] Fetching content...")
+        scraper.fetch_and_cache_content(art)
+
     if art.content:
-        # Respect paragraph boundaries, wrap each paragraph sensibly.
         for paragraph in art.content.split("\n"):
             paragraph = paragraph.strip()
             if not paragraph:
                 print()
                 continue
-            # textwrap counts characters, not display width. CJK text still
-            # looks reasonable at width=40 since each char takes 2 columns.
             wrapped = textwrap.wrap(
                 paragraph,
                 width=40,
@@ -296,11 +303,11 @@ def _show_article(art):
             for line in wrapped or [paragraph]:
                 print(f"  {line}")
     else:
-        print("  (No content cached. Run crawl to fetch content.)")
+        print("  (Content unavailable — JSP articles need WebVPN to fetch.)")
     print()
 
 
-def _show_article_list(articles, label="", page_size=20):
+def _show_article_list(articles, label="", page_size=20, scraper=None):
     """Show numbered article list with pagination.
 
     Commands:
@@ -368,7 +375,7 @@ def _show_article_list(articles, label="", page_size=20):
         try:
             idx = int(sel) - 1
             if 0 <= idx < total:
-                _show_article(articles[idx])
+                _show_article(articles[idx], scraper=scraper)
             else:
                 print(f"  Invalid number (1-{total})")
         except ValueError:
@@ -428,6 +435,7 @@ def cms_menu(scraper: CMSScraper):
                 results,
                 f"Found {len(results)} results for '{keyword}' in {scope}:",
                 page_size=page_size,
+                scraper=scraper,
             )
 
         elif choice == "2":
@@ -441,6 +449,7 @@ def cms_menu(scraper: CMSScraper):
                 articles,
                 f"Recent articles ({scope}):",
                 page_size=page_size,
+                scraper=scraper,
             )
 
         elif choice == "3":

@@ -231,6 +231,26 @@ class CMSScraper:
             return ""
         return extract_article_content(resp.text)
 
+    def fetch_and_cache_content(self, article: Article) -> str:
+        """Fetch article body on demand and persist to disk.
+
+        Called from the reader when an article's ``content`` is empty, e.g.
+        because an earlier crawl ran with ``fetch_content=False`` or predated
+        the category being enabled.  Returns the resulting content (may be
+        empty if the fetch failed, e.g. JSP article with no WebVPN).
+        """
+        if article.content:
+            return article.content
+        content = self._fetch_content(article.url)
+        if content:
+            article.content = content
+            # Make sure the in-memory copy in self._articles reflects this too.
+            key = f"{article.site}:{article.id}"
+            if key in self._articles:
+                self._articles[key].content = content
+            self._save_db(article.site)
+        return content
+
     def crawl(
         self,
         site_key: str,

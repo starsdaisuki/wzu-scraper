@@ -146,9 +146,17 @@ def parse_list_page(html: str) -> list[ParsedArticle]:
 
 
 def extract_article_content(html: str) -> str:
-    """Extract and normalize the article content body."""
-    match = re.search(r'class="v_news_content"[^>]*>(.*?)</div>', html, re.DOTALL)
+    """Extract and normalize the article content body.
+
+    Works for both the traditional htm articles (``class="v_news_content"``)
+    and 联奕 JSP articles (``class='v_news_content'`` with single quotes).
+    """
+    match = re.search(
+        r"class=(['\"])v_news_content\1[^>]*>(.*?)</div>",
+        html,
+        re.DOTALL,
+    )
     if not match:
         return ""
-    content = re.sub(r"<[^>]+>", "", match.group(1))
+    content = re.sub(r"<[^>]+>", "", match.group(2))
     return re.sub(r"\s+", " ", content).strip()
