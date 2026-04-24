@@ -14,7 +14,9 @@ wheels/
 
 # Sensitive data
 .cookies.json
+.webvpn-cookies.json
 .env
 *.har
 jwc_articles.json
 data/
+exports/

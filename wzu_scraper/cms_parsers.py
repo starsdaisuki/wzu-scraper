@@ -105,6 +105,25 @@ def parse_style_g(html: str) -> list[ParsedArticle]:
     return _build_articles(matches)
 
 
+def parse_style_jsp(html: str) -> list[ParsedArticle]:
+    """Parse 联奕 JSP-style news list (xlist.jsp output).
+
+    Pattern::
+
+        <li ...><span class="w"><a href="xdetails.jsp?urltype=news.NewsContentUrl
+              &wbtreeid=<CAT>&wbnewsid=<ART>">TITLE</a></span>
+          <span class="time">YYYY年MM月DD日</span></li>
+    """
+    matches = re.findall(
+        r'<li[^>]*>\s*<span[^>]*class="w"[^>]*>\s*<a[^>]*href="[^"]*xdetails\.jsp\?'
+        r"urltype=news\.NewsContentUrl&(?:amp;)?wbtreeid=(\d+)&(?:amp;)?wbnewsid=(\d+)[^\"]*"
+        r'"[^>]*>(.*?)</a>\s*</span>\s*<span[^>]*class="time"[^>]*>(.*?)</span>',
+        html,
+        re.DOTALL,
+    )
+    return _build_articles(matches)
+
+
 STYLE_PARSERS = [
     parse_style_a,
     parse_style_b,
@@ -113,6 +132,7 @@ STYLE_PARSERS = [
     parse_style_e,
     parse_style_f,
     parse_style_g,
+    parse_style_jsp,
 ]
 
 

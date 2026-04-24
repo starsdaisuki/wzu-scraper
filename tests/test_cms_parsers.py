@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from wzu_scraper.cms_parsers import (
     extract_article_content,
+    parse_list_page,
     parse_style_a,
     parse_style_b,
     parse_style_c,
@@ -9,6 +10,7 @@ from wzu_scraper.cms_parsers import (
     parse_style_e,
     parse_style_f,
     parse_style_g,
+    parse_style_jsp,
 )
 
 from .conftest import read_fixture
@@ -54,6 +56,25 @@ def test_parse_style_g() -> None:
     articles = parse_style_g(read_fixture("cms", "style_g.html"))
     assert articles[0].title == "媒体聚焦示例"
     assert articles[0].date == "2026-04-13"
+
+
+def test_parse_style_jsp() -> None:
+    """JSP list (xlist.jsp) parses wbtreeid/wbnewsid + 中文 date format."""
+    articles = parse_style_jsp(read_fixture("cms", "style_jsp.html"))
+    assert len(articles) == 2
+    assert articles[0].category_id == "1276"
+    assert articles[0].article_id == "39834"
+    assert articles[0].title == "学生公告示例(JSP)"
+    assert articles[0].date == "2026-04-24"
+    # HTML entities (&amp;) in the URL must still match.
+    assert articles[1].article_id == "39794"
+
+
+def test_parse_list_page_routes_to_jsp_style() -> None:
+    """The generic dispatcher must pick the JSP parser for JSP-style lists."""
+    articles = parse_list_page(read_fixture("cms", "style_jsp.html"))
+    assert len(articles) == 2
+    assert articles[0].category_id == "1276"
 
 
 def test_extract_article_content() -> None:

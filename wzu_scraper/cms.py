@@ -7,12 +7,21 @@ import json
 import logging
 import re
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Protocol
 
 import httpx
 
 from .cms_parsers import extract_article_content, parse_list_page
+
+
+class HttpClient(Protocol):
+    """Minimal shape shared by ``httpx.Client`` and :class:`WebVPNClient`."""
+
+    def get(self, url: str, **kwargs) -> httpx.Response: ...
+    def close(self) -> None: ...
+
 
 HEADERS = {
     "User-Agent": (
@@ -42,7 +51,12 @@ class SiteConfig:
     key: str  # e.g. "jwc"
     name: str  # e.g. "教务处"
     base_url: str  # e.g. "https://jwc.wzu.edu.cn"
-    categories: dict[str, str]  # path -> display name, e.g. {"jxxw": "教学新闻"}
+    # htm category: {path -> display name}  e.g. {"jxxw": "教学新闻"}
+    categories: dict[str, str] = field(default_factory=dict)
+    # JSP (联奕 xlist.jsp) category: {wbtreeid -> display name}.  JSP-only sites
+    # (notably 教务处) require an on-campus IP to fetch, so these only resolve
+    # through a WebVPN client.
+    jsp_categories: dict[str, str] = field(default_factory=dict)
 
 
 # Site definitions
@@ -55,6 +69,12 @@ SITES: dict[str, SiteConfig] = {
             "jxxw": "教学新闻",
             "xxfw/xlzxsj": "校历/作息时间",
             "zcjd/zyyx": "政策解读",
+        },
+        # These JSP categories are IP-whitelisted — must crawl via WebVPN.
+        jsp_categories={
+            "1276": "学生公告",
+            "1177": "教师公告",
+            "1190": "信息服务",
         },
     ),
     "ai": SiteConfig(
@@ -96,9 +116,11 @@ SITES: dict[str, SiteConfig] = {
         base_url="https://jdxy.wzu.edu.cn",
         categories={
             "xwkd": "新闻快递",
+            "xstz": "学生通知",
             "xstd/tzgg": "通知公告",
             "xstd/txdt1": "团学动态",
             "xsjiang": "学术动态",
+            "mtkjd": "媒体看机电",
         },
     ),
     "shxy": SiteConfig(
@@ -132,10 +154,17 @@ SITES: dict[str, SiteConfig] = {
 
 
 class CMSScraper:
-    """Generic scraper for WZU CMS websites."""
+    """Generic scraper for WZU CMS websites.
 
-    def __init__(self):
-        self._client = httpx.Client(
+    By default builds a plain :class:`httpx.Client`; callers that need to
+    access on-campus JSP categories (교务处 学生公告, 等) can pass a
+    :class:`wzu_scraper.webvpn.WebVPNClient` via ``client=``.  Any object
+    conforming to :class:`HttpClient` works.
+    """
+
+    def __init__(self, client: HttpClient | None = None) -> None:
+        self._owns_client = client is None
+        self._client: HttpClient = client or httpx.Client(
             headers=HEADERS,
             follow_redirects=True,
             timeout=15.0,
@@ -143,6 +172,16 @@ class CMSScraper:
         self._articles: dict[str, Article] = {}
         DB_DIR.mkdir(exist_ok=True)
         self._load_all_dbs()
+
+    @property
+    def supports_jsp(self) -> bool:
+        """Whether the underlying client can reach IP-restricted JSP pages.
+
+        JSP categories are IP-whitelisted; only a WebVPN-backed client can
+        fetch them.  The plain ``httpx.Client`` default cannot.
+        """
+        # Avoid importing WebVPNClient at module load time; detect by class name.
+        return type(self._client).__name__ == "WebVPNClient"
 
     def _db_path(self, site_key: str) -> Path:
         return DB_DIR / f"{site_key}_articles.json"
@@ -198,14 +237,17 @@ class CMSScraper:
         category_path: str | None = None,
         fetch_content: bool = True,
         max_pages: int = 0,
+        include_jsp: bool = True,
     ) -> int:
         """Crawl articles from a site.
 
         Args:
             site_key: e.g. "jwc" or "slxy"
-            category_path: Specific category path, or None for all
+            category_path: Specific htm category path, or None for all
             fetch_content: Whether to fetch full article text
             max_pages: Max pages per category (0 = all)
+            include_jsp: Also crawl ``jsp_categories`` when the client supports
+                it.  Ignored without WebVPN since those pages are IP-blocked.
         """
         site = SITES[site_key]
         cats = (
@@ -216,71 +258,210 @@ class CMSScraper:
         total_new = 0
 
         for path, cat_name in cats.items():
-            logger.info(
-                "Crawling CMS category", extra={"site": site.name, "category": cat_name}
+            total_new += self._crawl_htm_category(
+                site, path, cat_name, fetch_content, max_pages
             )
-            new_count = 0
 
-            resp = self._client.get(f"{site.base_url}/{path}.htm")
-            if resp.status_code != 200:
-                logger.warning(
-                    "Failed to fetch CMS list page",
-                    extra={
-                        "site": site.name,
-                        "category": cat_name,
-                        "status_code": resp.status_code,
-                    },
+        if include_jsp and site.jsp_categories and category_path is None:
+            if not self.supports_jsp:
+                logger.info(
+                    "Skipping JSP categories; client does not support WebVPN",
+                    extra={"site": site.name},
                 )
-                continue
-
-            articles = self._parse_list_page(resp.text, cat_name, site)
-
-            # Find total pages
-            page_name = path.split("/")[-1]
-            page_nums = re.findall(rf"{page_name}/(\d+)\.htm", resp.text)
-            total_pages = max(int(p) for p in page_nums) if page_nums else 0
-
-            # Process current page
-            for art in articles:
-                key = f"{art.site}:{art.id}"
-                if key not in self._articles:
-                    if fetch_content:
-                        art.content = self._fetch_content(art.url)
-                        time.sleep(0.2)
-                    self._articles[key] = art
-                    new_count += 1
-
-            # Crawl remaining pages. 博达站群 pagination is REVERSE: the
-            # default .htm shows newest; page/N.htm (highest N) is next newest,
-            # page/1.htm is the oldest batch. So walk from total_pages down.
-            pages = range(total_pages, 0, -1)
-            if max_pages > 0:
-                pages = list(pages)[:max_pages]
-
-            for page_num in pages:
-                url = f"{site.base_url}/{page_name}/{page_num}.htm"
-                resp = self._client.get(url)
-                if resp.status_code != 200:
-                    continue
-
-                page_articles = self._parse_list_page(resp.text, cat_name, site)
-                for art in page_articles:
-                    key = f"{art.site}:{art.id}"
-                    if key not in self._articles:
-                        if fetch_content:
-                            art.content = self._fetch_content(art.url)
-                            time.sleep(0.2)
-                        self._articles[key] = art
-                        new_count += 1
-
-            total_new += new_count
-            logger.info(
-                "Finished CMS category crawl",
-                extra={"site": site.name, "category": cat_name, "new_count": new_count},
-            )
+            else:
+                for wbtreeid, cat_name in site.jsp_categories.items():
+                    total_new += self._crawl_jsp_category(
+                        site, wbtreeid, cat_name, fetch_content, max_pages
+                    )
 
         self._save_db(site_key)
         return total_new
+
+    def _crawl_htm_category(
+        self,
+        site: SiteConfig,
+        path: str,
+        cat_name: str,
+        fetch_content: bool,
+        max_pages: int,
+    ) -> int:
+        """Crawl a single .htm-style category across its paginated pages."""
+        logger.info(
+            "Crawling CMS category", extra={"site": site.name, "category": cat_name}
+        )
+        new_count = 0
+
+        resp = self._client.get(f"{site.base_url}/{path}.htm")
+        if resp.status_code != 200:
+            logger.warning(
+                "Failed to fetch CMS list page",
+                extra={
+                    "site": site.name,
+                    "category": cat_name,
+                    "status_code": resp.status_code,
+                },
+            )
+            return 0
+
+        new_count += self._ingest_htm_list_page(
+            resp.text, cat_name, site, fetch_content
+        )
+
+        page_name = path.split("/")[-1]
+        page_nums = re.findall(rf"{page_name}/(\d+)\.htm", resp.text)
+        total_pages = max(int(p) for p in page_nums) if page_nums else 0
+
+        # 博达站群 pagination is REVERSE: default .htm shows newest;
+        # page/N.htm (highest N) is the next newest batch; page/1.htm is
+        # the oldest.  Walk from total_pages down for "crawl newest first".
+        pages = range(total_pages, 0, -1)
+        if max_pages > 0:
+            pages = list(pages)[:max_pages]
+
+        for page_num in pages:
+            url = f"{site.base_url}/{page_name}/{page_num}.htm"
+            resp = self._client.get(url)
+            if resp.status_code != 200:
+                continue
+            new_count += self._ingest_htm_list_page(
+                resp.text, cat_name, site, fetch_content
+            )
+
+        logger.info(
+            "Finished CMS category crawl",
+            extra={"site": site.name, "category": cat_name, "new_count": new_count},
+        )
+        return new_count
+
+    def _ingest_htm_list_page(
+        self,
+        html: str,
+        cat_name: str,
+        site: SiteConfig,
+        fetch_content: bool,
+    ) -> int:
+        """Parse one htm list page and ingest any new articles; return new count."""
+        new_count = 0
+        for art in self._parse_list_page(html, cat_name, site):
+            key = f"{art.site}:{art.id}"
+            if key in self._articles:
+                continue
+            if fetch_content:
+                art.content = self._fetch_content(art.url)
+                time.sleep(0.2)
+            self._articles[key] = art
+            new_count += 1
+        return new_count
+
+    def _crawl_jsp_category(
+        self,
+        site: SiteConfig,
+        wbtreeid: str,
+        cat_name: str,
+        fetch_content: bool,
+        max_pages: int,
+    ) -> int:
+        """Crawl a single JSP-style category (xlist.jsp?wbtreeid=...)."""
+        logger.info(
+            "Crawling CMS JSP category",
+            extra={"site": site.name, "category": cat_name, "wbtreeid": wbtreeid},
+        )
+        new_count = 0
+
+        base_list_url = f"{site.base_url}/new2021/xlist.jsp"
+        resp = self._client.get(
+            base_list_url,
+            params={"urltype": "tree.TreeTempUrl", "wbtreeid": wbtreeid},
+        )
+        if resp.status_code != 200:
+            logger.warning(
+                "Failed to fetch JSP list page",
+                extra={
+                    "site": site.name,
+                    "category": cat_name,
+                    "status_code": resp.status_code,
+                },
+            )
+            return 0
+
+        new_count += self._ingest_jsp_list_page(
+            resp.text, cat_name, site, fetch_content
+        )
+
+        # Find total page count from "totalpage=N" or "1/N" pattern in html.
+        total_pages = 0
+        m = re.search(r"totalpage=(\d+)", resp.text)
+        if m:
+            total_pages = int(m.group(1))
+        else:
+            m = re.search(r"1/(\d+)", resp.text)
+            if m:
+                total_pages = int(m.group(1))
+
+        # JSP paging: PAGENUM=1 is the page we already fetched.  Newer items
+        # are on lower page numbers, so walk 2, 3, ... forwards.
+        pages = range(2, total_pages + 1)
+        if max_pages > 0:
+            pages = list(pages)[: max(0, max_pages - 1)]
+
+        for page_num in pages:
+            resp = self._client.get(
+                base_list_url,
+                params={
+                    "totalpage": str(total_pages),
+                    "PAGENUM": str(page_num),
+                    "urltype": "tree.TreeTempUrl",
+                    "wbtreeid": wbtreeid,
+                },
+            )
+            if resp.status_code != 200:
+                continue
+            new_count += self._ingest_jsp_list_page(
+                resp.text, cat_name, site, fetch_content
+            )
+
+        logger.info(
+            "Finished CMS JSP category crawl",
+            extra={"site": site.name, "category": cat_name, "new_count": new_count},
+        )
+        return new_count
+
+    def _ingest_jsp_list_page(
+        self,
+        html: str,
+        cat_name: str,
+        site: SiteConfig,
+        fetch_content: bool,
+    ) -> int:
+        """Parse one JSP list page and ingest new articles."""
+        new_count = 0
+        for item in parse_list_page(html):
+            # JSP items come back with (category_id=wbtreeid, article_id=wbnewsid)
+            # from parse_style_jsp.  Namespace the DB key with ``jsp/`` so we
+            # cannot collide with legacy ``info/{category_id}/{article_id}`` keys.
+            art_id = f"jsp/{item.category_id}/{item.article_id}"
+            key = f"{site.key}:{art_id}"
+            if key in self._articles:
+                continue
+            art = Article(
+                id=art_id,
+                title=item.title,
+                date=item.date,
+                category=cat_name,
+                url=(
+                    f"{site.base_url}/new2021/xdetails.jsp"
+                    f"?urltype=news.NewsContentUrl"
+                    f"&wbtreeid={item.category_id}"
+                    f"&wbnewsid={item.article_id}"
+                ),
+                site=site.key,
+            )
+            if fetch_content:
+                art.content = self._fetch_content(art.url)
+                time.sleep(0.2)
+            self._articles[key] = art
+            new_count += 1
+        return new_count
 
     def search(
         self, keyword: str, site_key: str | None = None, limit: int = 20
@@ -318,7 +499,10 @@ class CMSScraper:
         return len(self._articles)
 
     def close(self):
-        self._client.close()
+        # Only tear down the client we created ourselves; when one is
+        # injected, the caller owns its lifetime.
+        if self._owns_client:
+            self._client.close()
 
     def __enter__(self):
         return self

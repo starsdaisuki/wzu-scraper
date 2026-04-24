@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import textwrap
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,7 @@ from wzu_scraper.cms import CMSScraper, SITES
 from wzu_scraper.exporters import default_export_path, export_records
 from wzu_scraper.notifier import build_notifier
 from wzu_scraper.tui import run_tui
+from wzu_scraper.webvpn import WebVPNClient
 
 # Load .env file if present
 _env_path = os.path.join(os.path.dirname(__file__), ".env")
@@ -191,6 +193,82 @@ def _prompt_multi_indexes(items, prompt: str):
         print("Invalid selection. Use numbers like 1 or 1,3,5.")
 
 
+def _current_school_year_and_semester(today: date | None = None) -> tuple[str, str]:
+    """Guess current academic year + semester from the calendar date.
+
+    Fall (秋, sem=1): Sept~Jan -> academic year starts in Sept of current year
+                     (Jan-Feb is still fall of previous academic year)
+    Spring (春, sem=2): Feb~Aug -> academic year started previous Sept
+    """
+    today = today or date.today()
+    if today.month >= 9:
+        start_year = today.year
+        semester = "1"
+    elif today.month <= 1:
+        start_year = today.year - 1
+        semester = "1"
+    else:
+        start_year = today.year - 1
+        semester = "2"
+    return f"{start_year}-{start_year + 1}", semester
+
+
+def _compute_gpa_stats(grades: list[dict]) -> dict:
+    """Weighted GPA from a list of grade dicts.
+
+    Skips rows with non-numeric GPA (e.g. 'P', '合格', 缓考).
+    """
+    total_credit = 0.0
+    weighted = 0.0
+    earned_credit = 0.0
+    failed = 0
+    counted = 0
+    for g in grades:
+        try:
+            credit = float(g.get("credit") or 0)
+            gpa = float(g.get("gpa_point") or 0)
+        except (TypeError, ValueError):
+            continue
+        if credit <= 0:
+            continue
+        total_credit += credit
+        weighted += gpa * credit
+        counted += 1
+        if gpa > 0:
+            earned_credit += credit
+        if gpa == 0:
+            failed += 1
+    avg_gpa = weighted / total_credit if total_credit > 0 else 0.0
+    return {
+        "gpa": avg_gpa,
+        "total_credit": total_credit,
+        "earned_credit": earned_credit,
+        "courses": counted,
+        "failed": failed,
+    }
+
+
+def _print_student_info(info: dict | None) -> None:
+    """Human-friendly student info display."""
+    if not info:
+        print("  (No student info)")
+        return
+    labels = {
+        "name": "姓名",
+        "role": "身份",
+        "profile": "简介",
+        "raw_length": "Raw page length",
+        "url": "URL",
+    }
+    for key, label in labels.items():
+        if key in info and info[key]:
+            print(f"  {label:<6}: {info[key]}")
+    # Print any other keys we didn't label explicitly.
+    for key, value in info.items():
+        if key not in labels and value:
+            print(f"  {key:<6}: {value}")
+
+
 def _show_article(art):
     """Display full article content."""
     print(f"\n{'=' * 60}")
@@ -201,41 +279,118 @@ def _show_article(art):
     print(f"  {art.url}")
     print(f"{'=' * 60}")
     if art.content:
-        words = art.content
-        while words:
-            print(f"  {words[:70]}")
-            words = words[70:]
+        # Respect paragraph boundaries, wrap each paragraph sensibly.
+        for paragraph in art.content.split("\n"):
+            paragraph = paragraph.strip()
+            if not paragraph:
+                print()
+                continue
+            # textwrap counts characters, not display width. CJK text still
+            # looks reasonable at width=40 since each char takes 2 columns.
+            wrapped = textwrap.wrap(
+                paragraph,
+                width=40,
+                break_long_words=True,
+                break_on_hyphens=False,
+            )
+            for line in wrapped or [paragraph]:
+                print(f"  {line}")
     else:
         print("  (No content cached. Run crawl to fetch content.)")
     print()
 
 
-def _show_article_list(articles, label=""):
-    """Show numbered article list, allow selecting one to read."""
+def _show_article_list(articles, label="", page_size=20):
+    """Show numbered article list with pagination.
+
+    Commands:
+      <number>   view article (1-based, global index)
+      n          next page
+      p          previous page
+      g <page>   jump to page
+      <Enter>    exit
+    """
     if not articles:
         print("No articles found.")
         return
 
     if label:
-        print(f"\n{label}\n")
+        print(f"\n{label}")
 
-    for i, art in enumerate(articles, 1):
-        site_tag = f"[{SITES[art.site].name}]" if art.site in SITES else ""
-        print(f"  {i:>3}. [{art.date}] {site_tag} {art.title}")
+    total = len(articles)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = 0  # 0-based
 
-    print("\n  Enter number to read, or press Enter to go back")
+    def render_page():
+        start = page * page_size
+        end = min(start + page_size, total)
+        print(
+            f"\n  Page {page + 1}/{total_pages}  (showing {start + 1}-{end} of {total})\n"
+        )
+        for i in range(start, end):
+            art = articles[i]
+            site_tag = f"[{SITES[art.site].name}]" if art.site in SITES else ""
+            print(f"  {i + 1:>3}. [{art.date}] {site_tag} {art.title}")
+        print("\n  <#>=read  n=next  p=prev  g<#>=goto page  <Enter>=back")
+
+    render_page()
     while True:
-        sel = input("  > ").strip()
+        sel = input("  > ").strip().lower()
         if not sel:
             break
+        if sel == "n":
+            if page + 1 < total_pages:
+                page += 1
+                render_page()
+            else:
+                print("  Already on last page")
+            continue
+        if sel == "p":
+            if page > 0:
+                page -= 1
+                render_page()
+            else:
+                print("  Already on first page")
+            continue
+        if sel.startswith("g"):
+            arg = sel[1:].strip()
+            try:
+                target = int(arg) - 1
+            except ValueError:
+                print("  Usage: g <page number>")
+                continue
+            if 0 <= target < total_pages:
+                page = target
+                render_page()
+            else:
+                print(f"  Page must be 1-{total_pages}")
+            continue
         try:
             idx = int(sel) - 1
-            if 0 <= idx < len(articles):
+            if 0 <= idx < total:
                 _show_article(articles[idx])
             else:
-                print("  Invalid number")
+                print(f"  Invalid number (1-{total})")
         except ValueError:
-            print("  Invalid number")
+            print("  Invalid input")
+
+
+def _prompt_site_filter(scraper: CMSScraper, label: str) -> str | None:
+    """Let the user pick a site to filter on, or all sites.
+
+    Returns site_key string, or None for all sites.
+    """
+    site_keys = list(SITES.keys())
+    print(f"\n{label}:")
+    print("  0. All sites (全部)")
+    for i, key in enumerate(site_keys, 1):
+        count = scraper.stats().get(key, 0)
+        print(f"  {i}. {SITES[key].name} ({count} articles)")
+    valid = {"0"} | {str(i) for i in range(1, len(site_keys) + 1)}
+    choice = _prompt_choice("Choice [0=all]: ", valid, default="0")
+    if choice == "0":
+        return None
+    return site_keys[int(choice) - 1]
 
 
 def cms_menu(scraper: CMSScraper):
@@ -262,14 +417,31 @@ def cms_menu(scraper: CMSScraper):
             keyword = _prompt_text("Keyword: ")
             if not keyword:
                 continue
-            results = scraper.search(keyword)
+            site_key = _prompt_site_filter(scraper, "Filter by site")
+            page_size = _prompt_int(
+                "Page size [20]: ", default=20, minimum=1, maximum=200
+            )
+            # Pull a large limit so pagination has everything to work with.
+            results = scraper.search(keyword, site_key=site_key, limit=10_000)
+            scope = SITES[site_key].name if site_key else "all sites"
             _show_article_list(
-                results, f"Found {len(results)} results for '{keyword}':"
+                results,
+                f"Found {len(results)} results for '{keyword}' in {scope}:",
+                page_size=page_size,
             )
 
         elif choice == "2":
-            articles = scraper.list_recent(limit=20)
-            _show_article_list(articles, "Recent articles:")
+            site_key = _prompt_site_filter(scraper, "Which site")
+            page_size = _prompt_int(
+                "Page size [20]: ", default=20, minimum=1, maximum=200
+            )
+            articles = scraper.list_recent(site_key=site_key, limit=10_000)
+            scope = SITES[site_key].name if site_key else "all sites"
+            _show_article_list(
+                articles,
+                f"Recent articles ({scope}):",
+                page_size=page_size,
+            )
 
         elif choice == "3":
             print("Sites:")
@@ -288,10 +460,24 @@ def cms_menu(scraper: CMSScraper):
             print(f"[+] Done! {new} new, {scraper.total_articles} total")
 
         elif choice == "4":
-            print("[*] Crawling all sites...")
+            max_pages = _prompt_int(
+                "Max pages per category [5]: ", default=5, minimum=1
+            )
+            total_sites = len(SITES)
+            print(f"[*] Crawling {total_sites} sites (max {max_pages} pages each)...")
             total_new = 0
-            for site_key in SITES:
-                total_new += scraper.crawl(site_key, max_pages=5)
+            try:
+                for i, site_key in enumerate(SITES, 1):
+                    print(
+                        f"  [{i}/{total_sites}] {SITES[site_key].name}...",
+                        end=" ",
+                        flush=True,
+                    )
+                    added = scraper.crawl(site_key, max_pages=max_pages)
+                    total_new += added
+                    print(f"+{added}")
+            except KeyboardInterrupt:
+                print("\n[!] Interrupted. Partial results kept.")
             print(f"[+] Done! {total_new} new, {scraper.total_articles} total")
 
         elif choice == "0":
@@ -867,132 +1053,206 @@ def monitor_menu(client: WZUClient):
         print(f"\n[*] Stopped after {check_num} checks")
 
 
+def _make_webvpn_client(
+    username: str | None, password: str | None
+) -> WebVPNClient | None:
+    """Try to produce an authenticated WebVPNClient, return None on failure.
+
+    WebVPN is optional: it unlocks campus-only JSP categories (教务处 学生公告,
+    jdxy 教师通知, etc.) but is NOT required for the core features.
+    """
+    vpn = WebVPNClient()
+    if vpn.check_session():
+        return vpn
+    if not username or not password:
+        vpn.close()
+        return None
+    if vpn.login(username, password):
+        return vpn
+    vpn.close()
+    return None
+
+
 def main():
     with WZUClient() as client:
+        creds_username = os.environ.get("WZU_USERNAME")
+        creds_password = os.environ.get("WZU_PASSWORD")
+
         # Check if existing session works
         if client.check_session():
             print("[+] Existing session is valid, skipping login")
         else:
             print("[*] Need to login")
-            username = os.environ.get("WZU_USERNAME") or _prompt_text(
-                "Student ID (学号): "
-            )
-            password = os.environ.get("WZU_PASSWORD") or getpass.getpass(
-                "Password (密码): "
-            )
-            if not client.login_cas(username, password):
+            creds_username = creds_username or _prompt_text("Student ID (学号): ")
+            creds_password = creds_password or getpass.getpass("Password (密码): ")
+            if not client.login_cas(creds_username, creds_password):
                 print("[!] Login failed, exiting")
                 sys.exit(1)
 
-        scraper = CMSScraper()
-
-        # Menu
-        while True:
-            print("\n--- WZU Scraper ---")
-            print("1. Course schedule (课程表)")
-            print("2. Grades (成绩)")
-            print("3. Exams (考试安排)")
-            print("4. Student info (个人信息)")
-            print("5. Website search (网站搜索)")
-            print("6. Course selection (选课/抢课)")
-            print("7. Course monitor (课程余量监控)")
-            print("8. Session status")
-            print("0. Exit")
-
-            choice = _prompt_choice(
-                "\nChoice: ",
-                {"0", "1", "2", "3", "4", "5", "6", "7", "8"},
+        # Optional WebVPN — unlocks on-campus JSP categories for the CMS crawler.
+        print("[*] Initializing WebVPN (for on-campus-only pages)...")
+        vpn = _make_webvpn_client(creds_username, creds_password)
+        if vpn is None:
+            print(
+                "[!] WebVPN unavailable, campus-only categories (教务处 学生公告 etc.)"
+                " will be skipped"
             )
+            scraper = CMSScraper()
+        else:
+            print("[+] WebVPN ready, campus-only categories enabled")
+            scraper = CMSScraper(client=vpn)
 
-            if choice == "1":
-                year = _prompt_school_year(
-                    "School year (e.g. 2025-2026 or 2025) [2025-2026]: ",
-                    default="2025-2026",
+        # Menu. Catch Ctrl+C once per iteration so a stray keystroke during a
+        # submenu/prompt returns to the main menu instead of nuking the session.
+        consecutive_interrupts = 0
+        while True:
+            try:
+                exit_now = _run_main_menu_iter(client, scraper, vpn)
+                if exit_now:
+                    break
+                consecutive_interrupts = 0
+            except KeyboardInterrupt:
+                consecutive_interrupts += 1
+                if consecutive_interrupts >= 2:
+                    print("\n[*] Ctrl+C twice, exiting")
+                    scraper.close()
+                    if vpn is not None:
+                        vpn.save()
+                        vpn.close()
+                    break
+                print(
+                    "\n[*] Cancelled. Use menu option 0 to quit, or Ctrl+C again to force exit"
                 )
-                sem = _prompt_semester(
-                    "Semester (1=fall, 2=spring) [2]: ",
-                    default="2",
-                )
-                courses = client.get_course_schedule(year, sem)
-                if courses:
-                    print(
-                        f"\n{'Course':<30} {'Teacher':<10} {'Location':<15} {'Day':<6} {'Period':<8} {'Weeks':<15}"
-                    )
-                    print("-" * 90)
-                    for c in courses:
-                        print(
-                            f"{c['name']:<30} {c['teacher']:<10} {c['location']:<15} {c['weekday']:<6} {c['periods']:<8} {c['weeks']:<15}"
-                        )
-                else:
-                    print("No courses found")
-                _maybe_export_records("schedule", courses)
-
-            elif choice == "2":
-                year = _prompt_school_year(
-                    "School year (e.g. 2025-2026 or 2025, Enter=all): ",
-                    default="",
-                )
-                sem = _prompt_semester(
-                    "Semester (1=fall, 2=spring, Enter=all): ",
-                    allow_blank=True,
-                )
-                grades = client.get_grades(year, sem)
-                if grades:
-                    print(
-                        f"\n{'Course':<35} {'Grade':<8} {'GPA':<6} {'Credit':<8} {'Category':<15}"
-                    )
-                    print("-" * 80)
-                    for g in grades:
-                        print(
-                            f"{g['name']:<35} {g['grade']:<8} {g['gpa_point']:<6} {g['credit']:<8} {g['category']:<15}"
-                        )
-                else:
-                    print("No grades found")
-                _maybe_export_records("grades", grades)
-
-            elif choice == "3":
-                year = _prompt_school_year(
-                    "School year (e.g. 2025-2026 or 2025) [2025-2026]: ",
-                    default="2025-2026",
-                )
-                sem = _prompt_semester(
-                    "Semester (1=fall, 2=spring) [1]: ",
-                    default="1",
-                )
-                exams = client.get_exams(year, sem)
-                if exams:
-                    print(f"\n  Found {len(exams)} exams:\n")
-                    for i, e in enumerate(exams, 1):
-                        print(f"  {i}. {e['name']}")
-                        print(f"     Time:     {e['time']}")
-                        print(f"     Location: {e['location']} ({e['campus']})")
-                        print(f"     Seat:     {e['seat']}")
-                        print(f"     Teacher:  {e['teacher']}")
-                        print()
-                else:
-                    print("No exams found for this semester")
-                _maybe_export_records("exams", exams)
-
-            elif choice == "4":
-                info = client.get_student_info()
-                print(json.dumps(info, ensure_ascii=False, indent=2))
-
-            elif choice == "5":
-                cms_menu(scraper)
-
-            elif choice == "6":
-                xk_menu(client)
-
-            elif choice == "7":
-                monitor_menu(client)
-
-            elif choice == "8":
-                valid = client.check_session()
-                print(f"Session valid: {valid}")
-
-            elif choice == "0":
+            except EOFError:
+                print("\n[*] EOF (Ctrl+D), exiting")
                 scraper.close()
+                if vpn is not None:
+                    vpn.save()
+                    vpn.close()
                 break
+
+
+def _run_main_menu_iter(client, scraper, vpn) -> bool:
+    """One iteration of the main menu.  Returns True when user requested exit."""
+    print("\n--- WZU Scraper ---")
+    print("1. Course schedule (课程表)")
+    print("2. Grades (成绩)")
+    print("3. Exams (考试安排)")
+    print("4. Student info (个人信息)")
+    print("5. Website search (网站搜索)")
+    print("6. Course selection (选课/抢课)")
+    print("7. Course monitor (课程余量监控)")
+    print("8. Session status")
+    print("0. Exit")
+
+    choice = _prompt_choice(
+        "\nChoice: ",
+        {"0", "1", "2", "3", "4", "5", "6", "7", "8"},
+    )
+
+    if choice == "1":
+        cur_year, cur_sem = _current_school_year_and_semester()
+        year = _prompt_school_year(
+            f"School year (e.g. 2025-2026 or 2025) [{cur_year}]: ",
+            default=cur_year,
+        )
+        sem = _prompt_semester(
+            f"Semester (1=fall, 2=spring) [{cur_sem}]: ",
+            default=cur_sem,
+        )
+        courses = client.get_course_schedule(year, sem)
+        if courses:
+            print(
+                f"\n{'Course':<30} {'Teacher':<10} {'Location':<15} {'Day':<6} {'Period':<8} {'Weeks':<15}"
+            )
+            print("-" * 90)
+            for c in courses:
+                print(
+                    f"{c['name']:<30} {c['teacher']:<10} {c['location']:<15} {c['weekday']:<6} {c['periods']:<8} {c['weeks']:<15}"
+                )
+        else:
+            print("No courses found")
+        _maybe_export_records("schedule", courses)
+
+    elif choice == "2":
+        year = _prompt_school_year(
+            "School year (e.g. 2025-2026 or 2025, Enter=all): ",
+            default="",
+        )
+        sem = _prompt_semester(
+            "Semester (1=fall, 2=spring, Enter=all): ",
+            allow_blank=True,
+        )
+        grades = client.get_grades(year, sem)
+        if grades:
+            print(
+                f"\n{'Course':<35} {'Grade':<8} {'GPA':<6} {'Credit':<8} {'Category':<15}"
+            )
+            print("-" * 80)
+            for g in grades:
+                print(
+                    f"{g['name']:<35} {g['grade']:<8} {g['gpa_point']:<6} {g['credit']:<8} {g['category']:<15}"
+                )
+            stats = _compute_gpa_stats(grades)
+            print("-" * 80)
+            print(
+                f"  Summary: {stats['courses']} courses  |  "
+                f"GPA {stats['gpa']:.3f}  |  "
+                f"Earned {stats['earned_credit']:.1f}/{stats['total_credit']:.1f} credits"
+                + (f"  |  Failed: {stats['failed']}" if stats["failed"] else "")
+            )
+        else:
+            print("No grades found")
+        _maybe_export_records("grades", grades)
+
+    elif choice == "3":
+        cur_year, cur_sem = _current_school_year_and_semester()
+        year = _prompt_school_year(
+            f"School year (e.g. 2025-2026 or 2025) [{cur_year}]: ",
+            default=cur_year,
+        )
+        sem = _prompt_semester(
+            f"Semester (1=fall, 2=spring) [{cur_sem}]: ",
+            default=cur_sem,
+        )
+        exams = client.get_exams(year, sem)
+        if exams:
+            print(f"\n  Found {len(exams)} exams:\n")
+            for i, e in enumerate(exams, 1):
+                print(f"  {i}. {e['name']}")
+                print(f"     Time:     {e['time']}")
+                print(f"     Location: {e['location']} ({e['campus']})")
+                print(f"     Seat:     {e['seat']}")
+                print(f"     Teacher:  {e['teacher']}")
+                print()
+        else:
+            print("No exams found for this semester")
+        _maybe_export_records("exams", exams)
+
+    elif choice == "4":
+        info = client.get_student_info()
+        _print_student_info(info)
+
+    elif choice == "5":
+        cms_menu(scraper)
+
+    elif choice == "6":
+        xk_menu(client)
+
+    elif choice == "7":
+        monitor_menu(client)
+
+    elif choice == "8":
+        valid = client.check_session()
+        print(f"Session valid: {valid}")
+
+    elif choice == "0":
+        scraper.close()
+        if vpn is not None:
+            vpn.save()
+            vpn.close()
+        return True
+    return False
 
 
 def should_run_tui(argv: list[str]) -> bool:
