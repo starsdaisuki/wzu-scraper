@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
@@ -150,12 +151,45 @@ class WebVPNClient:
             return "sign_in" not in location
         return False
 
-    def login(self, username: str, password: str) -> bool:
-        """Log in to WebVPN via CAS.
+    def login(self, username: str, password: str, attempts: int = 3) -> bool:
+        """Log in to WebVPN via CAS, retrying on transient network errors.
 
         Reuses :mod:`wzu_scraper.auth` helpers to parse the CAS login page
-        and build the encrypted form payload.
+        and build the encrypted form payload.  Wrong credentials are NOT
+        retried (they'd fail every time); only HTTP/network failures get
+        a second chance.
         """
+        last_error: Exception | None = None
+        for attempt in range(max(1, attempts)):
+            try:
+                if self._do_login_once(username, password):
+                    return True
+                # Reached the final URL but not logged in — credentials wrong
+                # or CAS denied us.  No point retrying.
+                return False
+            except (httpx.HTTPError, httpx.InvalidURL) as exc:
+                last_error = exc
+                logger.warning(
+                    "WebVPN login network error",
+                    extra={
+                        "attempt": attempt + 1,
+                        "of": attempts,
+                        "error": type(exc).__name__,
+                    },
+                )
+                if attempt + 1 < attempts:
+                    time.sleep(1.0 * (2**attempt))
+        logger.warning(
+            "WebVPN login gave up",
+            extra={
+                "attempts": attempts,
+                "last_error": type(last_error).__name__ if last_error else None,
+            },
+        )
+        return False
+
+    def _do_login_once(self, username: str, password: str) -> bool:
+        """Single login attempt — may raise on network errors."""
         logger.info("Starting WebVPN login via CAS")
         # 1) Visit webvpn home, follow redirects.  If already authenticated
         #    this lands back on webvpn itself; otherwise it lands on the CAS

@@ -33,6 +33,16 @@ class HttpClient(Protocol):
     def close(self) -> None: ...
 
 
+# Inter-fetch delay; tuned via WZU_REQUEST_DELAY env var (seconds).  The
+# default 0.2s is gentle enough for the school servers but burns minutes on
+# big crawls — power users can lower it.
+REQUEST_DELAY = max(0.0, float(os.environ.get("WZU_REQUEST_DELAY", "0.2")))
+
+# Number of attempts (incl. first) when fetching article bodies; transient
+# network errors get retried with exponential backoff.
+FETCH_ATTEMPTS = max(1, int(os.environ.get("WZU_FETCH_ATTEMPTS", "3")))
+
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -260,10 +270,40 @@ class CMSScraper:
         ]
 
     def _fetch_content(self, url: str) -> str:
-        resp = self._client.get(url)
-        if resp.status_code != 200:
-            return ""
-        return extract_article_content(resp.text)
+        """Fetch article body with retry/backoff on transient failures.
+
+        404/403 are treated as permanent (stop early); other non-200 codes
+        and HTTP errors get up to ``FETCH_ATTEMPTS`` total attempts with an
+        exponential 0.5/1.0/2.0s backoff.
+        """
+        last_error = ""
+        for attempt in range(FETCH_ATTEMPTS):
+            try:
+                resp = self._client.get(url)
+            except httpx.HTTPError as exc:
+                last_error = type(exc).__name__
+                logger.debug(
+                    "fetch_content network error",
+                    extra={"url": url, "attempt": attempt + 1, "error": last_error},
+                )
+            else:
+                if resp.status_code == 200:
+                    return extract_article_content(resp.text)
+                # Permanent failures: don't waste retries.
+                if resp.status_code in (403, 404, 410):
+                    logger.warning(
+                        "fetch_content permanent failure",
+                        extra={"url": url, "status": resp.status_code},
+                    )
+                    return ""
+                last_error = f"HTTP {resp.status_code}"
+            if attempt + 1 < FETCH_ATTEMPTS:
+                time.sleep(0.5 * (2**attempt))
+        logger.warning(
+            "fetch_content gave up after retries",
+            extra={"url": url, "attempts": FETCH_ATTEMPTS, "last_error": last_error},
+        )
+        return ""
 
     def fetch_and_cache_content(self, article: Article) -> str:
         """Fetch article body on demand and persist to disk.
@@ -311,24 +351,36 @@ class CMSScraper:
         )
         total_new = 0
 
-        for path, cat_name in cats.items():
-            total_new += self._crawl_htm_category(
-                site, path, cat_name, fetch_content, max_pages
-            )
-
-        if include_jsp and site.jsp_categories and category_path is None:
-            if not self.supports_jsp:
-                logger.info(
-                    "Skipping JSP categories; client does not support WebVPN",
-                    extra={"site": site.name},
+        # Save after EACH category so a Ctrl+C between categories preserves
+        # everything fetched so far.  The atomic write means partial saves
+        # during a single category are still safe.
+        try:
+            for path, cat_name in cats.items():
+                added = self._crawl_htm_category(
+                    site, path, cat_name, fetch_content, max_pages
                 )
-            else:
-                for wbtreeid, cat_name in site.jsp_categories.items():
-                    total_new += self._crawl_jsp_category(
-                        site, wbtreeid, cat_name, fetch_content, max_pages
-                    )
+                total_new += added
+                if added:
+                    self._save_db(site_key)
 
-        self._save_db(site_key)
+            if include_jsp and site.jsp_categories and category_path is None:
+                if not self.supports_jsp:
+                    logger.info(
+                        "Skipping JSP categories; client does not support WebVPN",
+                        extra={"site": site.name},
+                    )
+                else:
+                    for wbtreeid, cat_name in site.jsp_categories.items():
+                        added = self._crawl_jsp_category(
+                            site, wbtreeid, cat_name, fetch_content, max_pages
+                        )
+                        total_new += added
+                        if added:
+                            self._save_db(site_key)
+        finally:
+            # Always write a final consolidated copy on the way out (even if
+            # an exception or KeyboardInterrupt is propagating).
+            self._save_db(site_key)
         return total_new
 
     def _crawl_htm_category(
@@ -402,7 +454,7 @@ class CMSScraper:
                 continue
             if fetch_content:
                 art.content = self._fetch_content(art.url)
-                time.sleep(0.2)
+                time.sleep(REQUEST_DELAY)
             self._articles[key] = art
             new_count += 1
         return new_count
@@ -512,7 +564,7 @@ class CMSScraper:
             )
             if fetch_content:
                 art.content = self._fetch_content(art.url)
-                time.sleep(0.2)
+                time.sleep(REQUEST_DELAY)
             self._articles[key] = art
             new_count += 1
         return new_count
@@ -534,7 +586,7 @@ class CMSScraper:
                 continue
             if kw in art.title.lower() or kw in art.content.lower():
                 results.append(art)
-        results.sort(key=lambda a: a.date, reverse=True)
+        results.sort(key=lambda a: (a.date, a.id), reverse=True)
         return results[:limit]
 
     def list_recent(
@@ -544,7 +596,7 @@ class CMSScraper:
         arts = [
             a for a in self._articles.values() if not site_key or a.site == site_key
         ]
-        arts.sort(key=lambda a: a.date, reverse=True)
+        arts.sort(key=lambda a: (a.date, a.id), reverse=True)
         return arts[:limit]
 
     def stats(self) -> dict[str, int]:

@@ -1,4 +1,10 @@
-"""Terminal UI for WZU Scraper."""
+"""Terminal UI for WZU Scraper.
+
+Scope: JWXT-only (course schedule, grades, exams, course selection,
+monitor).  The CLI's "Website search" / CMS browser is **not** wired into
+the TUI yet — open the CLI (``wzu`` / ``main.py`` without ``--tui``) for
+WebVPN-backed CMS browsing.
+"""
 
 from __future__ import annotations
 

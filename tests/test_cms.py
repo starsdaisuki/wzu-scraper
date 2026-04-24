@@ -216,6 +216,82 @@ def test_load_db_decodes_html_entities(tmp_path, monkeypatch):
     assert art.content == "段落 一 结束"
 
 
+def test_fetch_content_retries_transient_errors(tmp_path, monkeypatch):
+    """Network failures get retried; persistent 200 OK eventually wins."""
+    monkeypatch.setattr(CMSScraper, "_load_all_dbs", lambda self: None)
+    # Avoid wasting test time on backoff sleeps.
+    monkeypatch.setattr("wzu_scraper.cms.time.sleep", lambda s: None)
+    # Force 3 attempts.
+    monkeypatch.setattr("wzu_scraper.cms.FETCH_ATTEMPTS", 3)
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise httpx.ConnectError("boom")
+        return httpx.Response(200, text="<div class='v_news_content'>命中</div>")
+
+    scraper = CMSScraper()
+    scraper._client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        body = scraper._fetch_content("https://jwc.wzu.edu.cn/x")
+        assert body == "命中"
+        assert calls["n"] == 3
+    finally:
+        scraper.close()
+
+
+def test_fetch_content_does_not_retry_404(tmp_path, monkeypatch):
+    """Permanent failures (404) abort immediately — no retry burn."""
+    monkeypatch.setattr(CMSScraper, "_load_all_dbs", lambda self: None)
+    monkeypatch.setattr("wzu_scraper.cms.time.sleep", lambda s: None)
+    monkeypatch.setattr("wzu_scraper.cms.FETCH_ATTEMPTS", 5)
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(404)
+
+    scraper = CMSScraper()
+    scraper._client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        scraper._fetch_content("https://jwc.wzu.edu.cn/missing")
+        assert calls["n"] == 1
+    finally:
+        scraper.close()
+
+
+def test_search_results_are_deterministically_ordered(monkeypatch):
+    """Same-date articles tie-break on id so paging order is stable."""
+    monkeypatch.setattr(CMSScraper, "_load_all_dbs", lambda self: None)
+
+    scraper = CMSScraper()
+
+    def make(aid):
+        return type(
+            "A",
+            (),
+            {
+                "site": "jwc",
+                "id": aid,
+                "title": f"通知 {aid}",
+                "content": "",
+                "date": "2026-04-24",
+            },
+        )()
+
+    # Insert in a deliberately weird order; expected result regardless: id desc.
+    scraper._articles = {f"jwc:{i}": make(i) for i in ["b", "a", "c"]}
+    try:
+        ids = [a.id for a in scraper.search("通知")]
+        # Date ties → order by id descending (matches our sort key).
+        assert ids == ["c", "b", "a"]
+    finally:
+        scraper.close()
+
+
 def test_jsp_crawl_parses_and_ingests(tmp_path, monkeypatch):
     """With a WebVPNClient, jsp categories fetch xlist.jsp and ingest articles."""
     monkeypatch.setattr(CMSScraper, "_load_all_dbs", lambda self: None)

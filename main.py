@@ -8,6 +8,7 @@ import shutil
 import sys
 import textwrap
 import time
+import unicodedata
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -295,20 +296,31 @@ def _print_student_info(info: dict | None) -> None:
     if not info:
         print("  (No student info)")
         return
+    # Recognised JWXT field names (from parse_student_info_html and friends).
+    # Anything not listed is displayed as-is using its raw key — better than
+    # silently dropping it if the parser ever grows to extract more fields.
     labels = {
         "name": "姓名",
         "role": "身份",
         "profile": "简介",
-        "raw_length": "Raw page length",
-        "url": "URL",
+        "student_id": "学号",
+        "major": "专业",
+        "class_name": "班级",
+        "college": "学院",
+        "advisor": "辅导员",
+        "url": "页面 URL",
+        "raw_length": "(原页面字符数)",
     }
+    label_col = max(_display_width(v) for v in labels.values())
+    print()
+    # Known fields first, in label-defined order.
     for key, label in labels.items():
-        if key in info and info[key]:
-            print(f"  {label:<6}: {info[key]}")
-    # Print any other keys we didn't label explicitly.
+        if key in info and info[key] not in (None, "", 0):
+            print(f"  {_pad_display(label, label_col)} : {info[key]}")
+    # Then any extra keys the parser surfaced.
     for key, value in info.items():
-        if key not in labels and value:
-            print(f"  {key:<6}: {value}")
+        if key not in labels and value not in (None, "", 0):
+            print(f"  {_pad_display(key, label_col)} : {value}")
 
 
 def _term_width(default: int = 80) -> int:
@@ -317,6 +329,44 @@ def _term_width(default: int = 80) -> int:
         return max(40, shutil.get_terminal_size((default, 24)).columns)
     except OSError:
         return default
+
+
+def _display_width(s: str) -> int:
+    """Number of columns ``s`` will occupy in a fixed-width terminal.
+
+    East-Asian wide and full-width characters render as 2 columns; everything
+    else as 1.  Ignores zero-width combining marks.
+    """
+    width = 0
+    for ch in s:
+        if unicodedata.combining(ch):
+            continue
+        width += 2 if unicodedata.east_asian_width(ch) in ("F", "W") else 1
+    return width
+
+
+def _pad_display(s: str, target_cols: int, align: str = "left") -> str:
+    """Pad ``s`` with spaces so it occupies exactly ``target_cols`` columns.
+
+    Truncates with `…` if it would overflow; uses display width, not char
+    count, so CJK columns line up.
+    """
+    width = _display_width(s)
+    if width > target_cols:
+        # Truncate display-width-aware.
+        out = ""
+        used = 0
+        for ch in s:
+            w = 2 if unicodedata.east_asian_width(ch) in ("F", "W") else 1
+            if unicodedata.combining(ch):
+                w = 0
+            if used + w > target_cols - 1:  # leave room for ellipsis
+                break
+            out += ch
+            used += w
+        return out + "…" + " " * max(0, target_cols - used - 1)
+    pad = " " * (target_cols - width)
+    return s + pad if align == "left" else pad + s
 
 
 def _show_article(art, scraper=None):
@@ -335,6 +385,8 @@ def _show_article(art, scraper=None):
     # URLs can be ~100 chars; show compactly on its own line prefixed so copy
     # is easy but it doesn't wrap into the body.
     print(f"  URL: {art.url}")
+    if "xdetails.jsp" in art.url or "xlist.jsp" in art.url:
+        print("       (campus-only — open via WebVPN if off-campus)")
     print("=" * width)
 
     if not art.content and scraper is not None:
@@ -973,7 +1025,7 @@ def _maybe_export_records(kind: str, records: list[dict[str, str]]) -> None:
     print(f"[+] Exported to {output_path}")
 
 
-def monitor_menu(client: WZUClient):
+def monitor_menu(client: WZUClient, vpn: WebVPNClient | None = None):
     """Course vacancy monitor (课程余量监控) sub-menu."""
     print("\n[*] Loading course selection config...")
     config = client.get_xk_config()
@@ -1057,10 +1109,27 @@ def monitor_menu(client: WZUClient):
         "Notify only on 0 -> vacancy transitions? (y/n) [y]: ",
         default=True,
     )
+    # During long monitor runs, the server quietly renews session cookies.
+    # Persist them every PERSIST_EVERY checks so a Ctrl+C / crash doesn't cost
+    # us a re-login.
+    PERSIST_EVERY = 30
     try:
         while True:
             time.sleep(interval)
             check_num += 1
+
+            if check_num % PERSIST_EVERY == 0:
+                # JWXT
+                try:
+                    client._save_cookies()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+                # WebVPN (optional)
+                if vpn is not None:
+                    try:
+                        vpn.save()
+                    except Exception:  # pragma: no cover
+                        pass
 
             for tc in targets:
                 updated = client.query_courses(config, tc.kcmc)
@@ -1249,14 +1318,31 @@ def _run_main_menu_iter(client, scraper, vpn) -> bool:
         )
         courses = client.get_course_schedule(year, sem)
         if courses:
-            print(
-                f"\n{'Course':<30} {'Teacher':<10} {'Location':<15} {'Day':<6} {'Period':<8} {'Weeks':<15}"
-            )
-            print("-" * 90)
+            cols = [
+                ("Course", 30),
+                ("Teacher", 10),
+                ("Location", 15),
+                ("Day", 6),
+                ("Period", 8),
+                ("Weeks", 15),
+            ]
+            header = " ".join(_pad_display(name, w) for name, w in cols)
+            print()
+            print(header)
+            print("-" * _display_width(header))
             for c in courses:
-                print(
-                    f"{c['name']:<30} {c['teacher']:<10} {c['location']:<15} {c['weekday']:<6} {c['periods']:<8} {c['weeks']:<15}"
+                row = " ".join(
+                    _pad_display(str(c.get(key, "")), w)
+                    for key, w in [
+                        ("name", 30),
+                        ("teacher", 10),
+                        ("location", 15),
+                        ("weekday", 6),
+                        ("periods", 8),
+                        ("weeks", 15),
+                    ]
                 )
+                print(row)
         else:
             print("No courses found")
         _maybe_export_records("schedule", courses)
@@ -1272,14 +1358,29 @@ def _run_main_menu_iter(client, scraper, vpn) -> bool:
         )
         grades = client.get_grades(year, sem)
         if grades:
-            print(
-                f"\n{'Course':<35} {'Grade':<8} {'GPA':<6} {'Credit':<8} {'Category':<15}"
-            )
-            print("-" * 80)
+            cols = [
+                ("Course", 35),
+                ("Grade", 8),
+                ("GPA", 6),
+                ("Credit", 8),
+                ("Category", 15),
+            ]
+            header = " ".join(_pad_display(name, w) for name, w in cols)
+            print()
+            print(header)
+            print("-" * _display_width(header))
             for g in grades:
-                print(
-                    f"{g['name']:<35} {g['grade']:<8} {g['gpa_point']:<6} {g['credit']:<8} {g['category']:<15}"
+                row = " ".join(
+                    _pad_display(str(g.get(key, "")), w)
+                    for key, w in [
+                        ("name", 35),
+                        ("grade", 8),
+                        ("gpa_point", 6),
+                        ("credit", 8),
+                        ("category", 15),
+                    ]
                 )
+                print(row)
             stats = _compute_gpa_stats(grades)
             print("-" * 80)
             # Summary line: GPA with weighted-credit denominator made explicit.
@@ -1343,7 +1444,7 @@ def _run_main_menu_iter(client, scraper, vpn) -> bool:
         xk_menu(client)
 
     elif choice == "7":
-        monitor_menu(client)
+        monitor_menu(client, vpn=vpn)
 
     elif choice == "8":
         valid = client.check_session()

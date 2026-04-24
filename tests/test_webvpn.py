@@ -86,3 +86,51 @@ def test_webvpn_check_session_recognises_signin_redirect(tmp_path) -> None:
     client._client = httpx.Client(transport=httpx.MockTransport(handler))
 
     assert client.check_session() is False
+
+
+def test_webvpn_login_retries_transient_network_errors(tmp_path, monkeypatch) -> None:
+    """A flaky network must not blow up login on the first connect failure."""
+    monkeypatch.setattr("wzu_scraper.webvpn.time.sleep", lambda s: None)
+
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        WebVPNClient,
+        "_do_login_once",
+        lambda self, u, p: _flaky_login(calls),
+    )
+
+    client = WebVPNClient(cookie_file=tmp_path / ".webvpn.json")
+    try:
+        ok = client.login("user", "pw", attempts=3)
+    finally:
+        client.close()
+    assert ok is True
+    assert calls["n"] == 2  # 1 failure + 1 success
+
+
+def _flaky_login(calls):
+    calls["n"] += 1
+    if calls["n"] < 2:
+        raise httpx.ConnectError("boom")
+    return True
+
+
+def test_webvpn_login_does_not_retry_bad_credentials(tmp_path, monkeypatch) -> None:
+    """If CAS rejects the password, retrying is pointless — bail immediately."""
+    monkeypatch.setattr("wzu_scraper.webvpn.time.sleep", lambda s: None)
+
+    calls = {"n": 0}
+
+    def handler(self, u, p):
+        calls["n"] += 1
+        return False  # simulates "got back to sign_in"
+
+    monkeypatch.setattr(WebVPNClient, "_do_login_once", handler)
+
+    client = WebVPNClient(cookie_file=tmp_path / ".webvpn.json")
+    try:
+        ok = client.login("user", "wrong", attempts=5)
+    finally:
+        client.close()
+    assert ok is False
+    assert calls["n"] == 1

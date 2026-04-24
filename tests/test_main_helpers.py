@@ -7,8 +7,10 @@ from main import (
     _append_monitor_log,
     _compute_gpa_stats,
     _current_school_year_and_semester,
+    _display_width,
     _normalize_iso_date_input,
     _normalize_school_year_input,
+    _pad_display,
     _parse_index_selection,
     _prompt_choice,
     _prompt_float,
@@ -170,3 +172,34 @@ def test_current_school_year_and_semester():
     assert _current_school_year_and_semester(date(2025, 10, 1)) == ("2025-2026", "1")
     assert _current_school_year_and_semester(date(2026, 1, 5)) == ("2025-2026", "1")
     assert _current_school_year_and_semester(date(2026, 7, 15)) == ("2025-2026", "2")
+
+
+def test_display_width_counts_cjk_as_two_columns():
+    """CJK / full-width chars take 2 columns; ASCII 1; combining marks 0."""
+    assert _display_width("hello") == 5
+    assert _display_width("中文") == 4  # 2 chars × 2 cols
+    assert _display_width("中a") == 3
+    # Combining mark (e.g., COMBINING ACUTE ACCENT) doesn't add width.
+    assert _display_width("é") == 1
+
+
+def test_pad_display_pads_with_correct_spaces_for_cjk():
+    # Target 10 columns, padded value should occupy exactly 10.
+    out = _pad_display("中文", 10)
+    # "中文" is 4 cols, so we expect 6 spaces appended.
+    assert out == "中文" + " " * 6
+    assert _display_width(out) == 10
+
+
+def test_pad_display_truncates_with_ellipsis_when_overflowing():
+    # 8-col budget; "高等数学A概论" needs more — must end with ellipsis,
+    # and total width must not exceed 8.
+    out = _pad_display("高等数学A概论", 8)
+    assert out.endswith("…") or "…" in out
+    assert _display_width(out) <= 8
+
+
+def test_pad_display_right_align():
+    out = _pad_display("12", 5, align="right")
+    assert out == "   12"
+    assert _display_width(out) == 5
