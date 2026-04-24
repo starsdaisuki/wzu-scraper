@@ -3,9 +3,12 @@
 Supports any WZU website built on the same CMS platform.
 """
 
+import html as html_lib
 import json
 import logging
+import os
 import re
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -14,6 +17,13 @@ from typing import Protocol
 import httpx
 
 from .cms_parsers import extract_article_content, parse_list_page
+
+
+def _sanitize(text: str) -> str:
+    """Decode HTML entities, collapse NBSP/whitespace."""
+    if not text:
+        return text
+    return re.sub(r"\s+", " ", html_lib.unescape(text).replace("\xa0", " ")).strip()
 
 
 class HttpClient(Protocol):
@@ -170,7 +180,7 @@ class CMSScraper:
             timeout=15.0,
         )
         self._articles: dict[str, Article] = {}
-        DB_DIR.mkdir(exist_ok=True)
+        DB_DIR.mkdir(parents=True, exist_ok=True)
         self._load_all_dbs()
 
     @property
@@ -197,17 +207,41 @@ class CMSScraper:
             try:
                 for item in json.loads(path.read_text()):
                     art = Article(**item)
+                    # Repair any HTML entities baked into older DBs.
+                    art.title = _sanitize(art.title)
+                    art.content = _sanitize(art.content)
                     self._articles[f"{art.site}:{art.id}"] = art
             except (json.JSONDecodeError, TypeError):
                 pass
 
     def _save_db(self, site_key: str):
+        """Atomic write: serialize to a temp file then rename into place.
+
+        A crash mid-write used to corrupt the JSON (truncated file ⇒ next
+        startup treats DB as empty).  Writing to a sibling ``.tmp`` and
+        ``os.replace``-ing is atomic on POSIX.
+        """
         site_articles = [
             asdict(a) for a in self._articles.values() if a.site == site_key
         ]
-        self._db_path(site_key).write_text(
-            json.dumps(site_articles, ensure_ascii=False, indent=2)
+        target = self._db_path(site_key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=target.name + ".",
+            suffix=".tmp",
+            dir=target.parent,
         )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(site_articles, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, target)
+        except Exception:
+            # Clean up stray tmp file on failure and re-raise.
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def _parse_list_page(
         self, html: str, category_name: str, site: SiteConfig
@@ -486,8 +520,14 @@ class CMSScraper:
     def search(
         self, keyword: str, site_key: str | None = None, limit: int = 20
     ) -> list[Article]:
-        """Search articles by keyword. Optionally filter by site."""
-        kw = keyword.lower()
+        """Search articles by keyword. Optionally filter by site.
+
+        An empty keyword matches nothing (rather than everything — ``"" in s``
+        is trivially True, which would dump the whole DB).
+        """
+        kw = keyword.strip().lower()
+        if not kw:
+            return []
         results = []
         for art in self._articles.values():
             if site_key and art.site != site_key:

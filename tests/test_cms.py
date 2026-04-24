@@ -101,6 +101,121 @@ def test_crawl_skips_jsp_without_webvpn(tmp_path, monkeypatch):
     scraper.close()
 
 
+def test_search_rejects_empty_keyword(monkeypatch):
+    """Empty keyword must return [] — not "every article in the DB"."""
+    monkeypatch.setattr(CMSScraper, "_load_all_dbs", lambda self: None)
+    scraper = CMSScraper()
+    scraper._articles = {
+        "jwc:a": type(
+            "A", (), {"site": "jwc", "title": "t", "content": "c", "date": "2026-01-01"}
+        )(),
+    }
+    try:
+        assert scraper.search("") == []
+        assert scraper.search("   ") == []
+    finally:
+        scraper.close()
+
+
+def test_save_db_is_atomic(tmp_path, monkeypatch):
+    """A crash mid-write must not corrupt an existing DB."""
+    import json as _json
+    from wzu_scraper.cms import Article
+
+    monkeypatch.setattr(CMSScraper, "_load_all_dbs", lambda self: None)
+
+    scraper = CMSScraper()
+    # Point DB_DIR at a temp dir so tests don't scribble on the real DB.
+    monkeypatch.setattr("wzu_scraper.cms.DB_DIR", tmp_path)
+    scraper._db_path = lambda site_key: tmp_path / f"{site_key}_articles.json"
+
+    # Pre-populate with a valid known good DB.
+    good = tmp_path / "jwc_articles.json"
+    good.write_text(
+        _json.dumps(
+            [
+                {
+                    "id": "x",
+                    "title": "good",
+                    "date": "2026-01-01",
+                    "category": "",
+                    "url": "",
+                    "site": "jwc",
+                    "content": "",
+                }
+            ]
+        )
+    )
+
+    # Arrange the in-memory state, then simulate a write failure.
+    scraper._articles["jwc:x"] = Article(
+        id="x",
+        title="updated",
+        date="2026-01-02",
+        category="",
+        url="",
+        site="jwc",
+        content="",
+    )
+
+    import json as stdlib_json
+
+    real_dump = stdlib_json.dump
+
+    def crashy_dump(*a, **k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(stdlib_json, "dump", crashy_dump)
+    try:
+        try:
+            scraper._save_db("jwc")
+        except RuntimeError:
+            pass
+        # The original good DB should still be intact on disk.
+        restored = _json.loads(good.read_text())
+        assert restored[0]["title"] == "good"
+        # And there should be no dangling .tmp file.
+        leftover_tmps = list(tmp_path.glob("jwc_articles.json.*"))
+        assert leftover_tmps == []
+    finally:
+        monkeypatch.setattr(stdlib_json, "dump", real_dump)
+        scraper.close()
+
+
+def test_load_db_decodes_html_entities(tmp_path, monkeypatch):
+    """Old DBs with baked-in entities must be sanitized on load."""
+    import json as _json
+
+    db = tmp_path / "jwc_articles.json"
+    db.write_text(
+        _json.dumps(
+            [
+                {
+                    "id": "x",
+                    "title": "A&amp;B\xa0通知",
+                    "date": "2026-01-01",
+                    "category": "",
+                    "url": "",
+                    "site": "jwc",
+                    "content": "段落&nbsp;一\xa0结束",
+                }
+            ]
+        )
+    )
+
+    monkeypatch.setattr("wzu_scraper.cms.DB_DIR", tmp_path)
+    scraper = CMSScraper.__new__(CMSScraper)
+    scraper._owns_client = True
+    scraper._client = None  # not needed for _load_db
+    scraper._articles = {}
+    scraper._db_path = lambda key: tmp_path / f"{key}_articles.json"
+    scraper._load_db("jwc")
+
+    art = scraper._articles["jwc:x"]
+    assert art.title == "A&B 通知"
+    assert art.content == "段落 一 结束"
+
+
 def test_jsp_crawl_parses_and_ingests(tmp_path, monkeypatch):
     """With a WebVPNClient, jsp categories fetch xlist.jsp and ingest articles."""
     monkeypatch.setattr(CMSScraper, "_load_all_dbs", lambda self: None)

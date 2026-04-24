@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass
 
@@ -17,7 +18,12 @@ class ParsedArticle:
 
 
 def _normalize_title(title: str) -> str:
-    return re.sub(r"<[^>]+>", "", title).strip()
+    # Strip inner tags, decode HTML entities (&amp; → &, &nbsp; → ' '),
+    # collapse stray whitespace including the non-breaking space '\xa0'.
+    stripped = re.sub(r"<[^>]+>", "", title)
+    decoded = html.unescape(stripped)
+    # Replace any remaining NBSPs and collapse runs of whitespace.
+    return re.sub(r"\s+", " ", decoded.replace("\xa0", " ")).strip()
 
 
 def _normalize_date(date_str: str) -> str:
@@ -145,18 +151,21 @@ def parse_list_page(html: str) -> list[ParsedArticle]:
     return []
 
 
-def extract_article_content(html: str) -> str:
+def extract_article_content(html_text: str) -> str:
     """Extract and normalize the article content body.
 
     Works for both the traditional htm articles (``class="v_news_content"``)
     and 联奕 JSP articles (``class='v_news_content'`` with single quotes).
+    HTML entities (``&nbsp;``, ``&amp;``, ``&quot;`` …) get decoded and any
+    stray non-breaking spaces collapsed so the text is readable as-is.
     """
     match = re.search(
         r"class=(['\"])v_news_content\1[^>]*>(.*?)</div>",
-        html,
+        html_text,
         re.DOTALL,
     )
     if not match:
         return ""
-    content = re.sub(r"<[^>]+>", "", match.group(2))
-    return re.sub(r"\s+", " ", content).strip()
+    stripped = re.sub(r"<[^>]+>", "", match.group(2))
+    decoded = html.unescape(stripped).replace("\xa0", " ")
+    return re.sub(r"\s+", " ", decoded).strip()

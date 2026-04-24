@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 from main import (
     _append_monitor_log,
+    _compute_gpa_stats,
+    _current_school_year_and_semester,
     _normalize_iso_date_input,
     _normalize_school_year_input,
     _parse_index_selection,
@@ -123,3 +125,48 @@ def test_prompt_index_retries_and_allows_cancel(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _: next(answers))
 
     assert _prompt_index(["a", "b", "c"], "Pick: ") == 1
+
+
+def test_compute_gpa_stats_excludes_pass_courses_from_denominator():
+    """A pass/合格 course must not pull GPA average down."""
+    grades = [
+        {"name": "A", "credit": "3", "gpa_point": "4.0", "grade": "95"},
+        {"name": "B", "credit": "2", "gpa_point": "", "grade": "合格"},
+    ]
+    stats = _compute_gpa_stats(grades)
+    assert stats["gpa"] == 4.0
+    assert stats["gpa_credit"] == 3.0
+    assert stats["passed_non_gpa"] == 1
+    assert stats["failed"] == 0
+    assert stats["earned_credit"] == 5.0  # 3 @4.0 + 2 @pass
+
+
+def test_compute_gpa_stats_counts_numeric_zero_as_fail():
+    grades = [{"name": "F", "credit": "3", "gpa_point": "0", "grade": "55"}]
+    stats = _compute_gpa_stats(grades)
+    assert stats["failed"] == 1
+    assert stats["passed_non_gpa"] == 0
+    assert stats["gpa_rated"] == 1
+    assert stats["earned_credit"] == 0.0
+
+
+def test_compute_gpa_stats_treats_blank_grade_as_unscored():
+    grades = [{"name": "U", "credit": "2", "gpa_point": "", "grade": "缓考"}]
+    stats = _compute_gpa_stats(grades)
+    assert stats["unscored"] == 1
+    assert stats["failed"] == 0
+    assert stats["gpa"] == 0.0
+
+
+def test_compute_gpa_stats_handles_text_fail():
+    grades = [{"name": "X", "credit": "1", "gpa_point": "", "grade": "不合格"}]
+    assert _compute_gpa_stats(grades)["failed"] == 1
+
+
+def test_current_school_year_and_semester():
+    from datetime import date
+
+    assert _current_school_year_and_semester(date(2026, 4, 24)) == ("2025-2026", "2")
+    assert _current_school_year_and_semester(date(2025, 10, 1)) == ("2025-2026", "1")
+    assert _current_school_year_and_semester(date(2026, 1, 5)) == ("2025-2026", "1")
+    assert _current_school_year_and_semester(date(2026, 7, 15)) == ("2025-2026", "2")

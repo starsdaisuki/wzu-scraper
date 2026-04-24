@@ -4,6 +4,7 @@ import getpass
 import json
 import os
 import re
+import shutil
 import sys
 import textwrap
 import time
@@ -214,37 +215,78 @@ def _current_school_year_and_semester(today: date | None = None) -> tuple[str, s
 
 
 def _compute_gpa_stats(grades: list[dict]) -> dict:
-    """Weighted GPA from a list of grade dicts.
+    """Weighted GPA stats.
 
-    Skips rows with non-numeric GPA (e.g. 'P', '合格', 缓考).
+    正方 leaves ``gpa_point`` blank for Pass/Fail style courses (P/合格/不合格).
+    Those MUST be excluded from both the numerator and the denominator of the
+    weighted average, otherwise a P-course silently pulls GPA down.
+
+    Categories:
+    - ``gpa_rated``: row has a numeric gpa_point AND credit > 0. Goes into GPA.
+    - ``passed_non_gpa``: row with blank gpa_point but grade text that looks
+      like a pass (合格 / P / passed) — counts toward earned credit only.
+    - ``failed``: numeric gpa_point == 0 OR grade text 不合格/F — explicit fail.
+    - ``unscored``: all other rows (blank grade, 缓考, 补考 pending) — ignored.
     """
-    total_credit = 0.0
     weighted = 0.0
+    gpa_credit = 0.0  # denominator for GPA average
     earned_credit = 0.0
+    total_credit = 0.0
+    gpa_rated = 0
+    passed_non_gpa = 0
     failed = 0
-    counted = 0
+    unscored = 0
+
     for g in grades:
         try:
             credit = float(g.get("credit") or 0)
-            gpa = float(g.get("gpa_point") or 0)
         except (TypeError, ValueError):
-            continue
+            credit = 0.0
         if credit <= 0:
+            unscored += 1
             continue
+
+        raw_gpa = (g.get("gpa_point") or "").strip()
+        grade_text = (g.get("grade") or "").strip()
         total_credit += credit
-        weighted += gpa * credit
-        counted += 1
-        if gpa > 0:
+
+        # 1) Numeric GPA row.
+        if raw_gpa:
+            try:
+                gpa = float(raw_gpa)
+            except ValueError:
+                gpa = None
+            if gpa is not None:
+                weighted += gpa * credit
+                gpa_credit += credit
+                gpa_rated += 1
+                if gpa > 0:
+                    earned_credit += credit
+                else:
+                    failed += 1
+                continue
+
+        # 2) Non-numeric grade: treat as pass/fail by the text.
+        lowered = grade_text.lower()
+        if grade_text in {"合格", "通过"} or lowered in {"p", "pass", "passed"}:
+            passed_non_gpa += 1
             earned_credit += credit
-        if gpa == 0:
+        elif grade_text in {"不合格", "未通过"} or lowered in {"f", "fail", "failed"}:
             failed += 1
-    avg_gpa = weighted / total_credit if total_credit > 0 else 0.0
+        else:
+            unscored += 1
+
+    avg_gpa = weighted / gpa_credit if gpa_credit > 0 else 0.0
     return {
         "gpa": avg_gpa,
         "total_credit": total_credit,
         "earned_credit": earned_credit,
-        "courses": counted,
+        "gpa_credit": gpa_credit,
+        "courses": gpa_rated + passed_non_gpa + failed + unscored,
+        "gpa_rated": gpa_rated,
+        "passed_non_gpa": passed_non_gpa,
         "failed": failed,
+        "unscored": unscored,
     }
 
 
@@ -269,6 +311,14 @@ def _print_student_info(info: dict | None) -> None:
             print(f"  {key:<6}: {value}")
 
 
+def _term_width(default: int = 80) -> int:
+    """Best-effort terminal width, with a safe fallback for non-tty runs."""
+    try:
+        return max(40, shutil.get_terminal_size((default, 24)).columns)
+    except OSError:
+        return default
+
+
 def _show_article(art, scraper=None):
     """Display full article content.
 
@@ -276,19 +326,26 @@ def _show_article(art, scraper=None):
     the body on demand (and persist it).  This covers JSP articles (only
     accessible via WebVPN) and any article indexed with ``fetch_content=False``.
     """
-    print(f"\n{'=' * 60}")
+    width = _term_width()
+    site_label = SITES.get(art.site, art).name if art.site in SITES else art.site
+    print()
+    print("=" * width)
     print(f"  {art.title}")
-    print(
-        f"  {art.date}  |  {art.category}  |  {SITES.get(art.site, art).name if art.site in SITES else art.site}"
-    )
-    print(f"  {art.url}")
-    print(f"{'=' * 60}")
+    print(f"  {art.date}  |  {art.category}  |  {site_label}")
+    # URLs can be ~100 chars; show compactly on its own line prefixed so copy
+    # is easy but it doesn't wrap into the body.
+    print(f"  URL: {art.url}")
+    print("=" * width)
 
     if not art.content and scraper is not None:
         print("  [*] Fetching content...")
         scraper.fetch_and_cache_content(art)
 
     if art.content:
+        # Wrap at roughly half the terminal width counted as characters, since
+        # CJK chars render 2 columns each — width=min(60, term/2+10) is a
+        # pleasant compromise without a fancy east-asian-width library.
+        wrap_width = max(40, min(80, width // 2 + 8))
         for paragraph in art.content.split("\n"):
             paragraph = paragraph.strip()
             if not paragraph:
@@ -296,7 +353,7 @@ def _show_article(art, scraper=None):
                 continue
             wrapped = textwrap.wrap(
                 paragraph,
-                width=40,
+                width=wrap_width,
                 break_long_words=True,
                 break_on_hyphens=False,
             )
@@ -305,6 +362,7 @@ def _show_article(art, scraper=None):
     else:
         print("  (Content unavailable — JSP articles need WebVPN to fetch.)")
     print()
+    print("-" * width)
 
 
 def _show_article_list(articles, label="", page_size=20, scraper=None):
@@ -328,6 +386,10 @@ def _show_article_list(articles, label="", page_size=20, scraper=None):
     total_pages = max(1, (total + page_size - 1) // page_size)
     page = 0  # 0-based
 
+    width = _term_width()
+    # Reserve space for index + date + site tag (~28 chars); title gets the rest.
+    title_budget = max(20, width - 30)
+
     def render_page():
         start = page * page_size
         end = min(start + page_size, total)
@@ -337,7 +399,12 @@ def _show_article_list(articles, label="", page_size=20, scraper=None):
         for i in range(start, end):
             art = articles[i]
             site_tag = f"[{SITES[art.site].name}]" if art.site in SITES else ""
-            print(f"  {i + 1:>3}. [{art.date}] {site_tag} {art.title}")
+            # Truncate long titles to keep list aligned on narrow terminals.
+            title = art.title
+            if len(title) > title_budget:
+                title = title[: title_budget - 1].rstrip() + "…"
+            cat = f"·{art.category}" if art.category else ""
+            print(f"  {i + 1:>3}. [{art.date}] {site_tag}{cat} {title}")
         print("\n  <#>=read  n=next  p=prev  g<#>=goto page  <Enter>=back")
 
     render_page()
@@ -376,6 +443,9 @@ def _show_article_list(articles, label="", page_size=20, scraper=None):
             idx = int(sel) - 1
             if 0 <= idx < total:
                 _show_article(articles[idx], scraper=scraper)
+                # Re-render the list so the user sees the current page again,
+                # not just a lone prompt after the article body.
+                render_page()
             else:
                 print(f"  Invalid number (1-{total})")
         except ValueError:
@@ -860,6 +930,14 @@ def _maybe_export_records(kind: str, records: list[dict[str, str]]) -> None:
     default_path = default_export_path(kind, choice)
     path_input = input(f"Output path [{default_path}]: ").strip()
     output_path = _resolve_export_output_path(path_input, default_path)
+    # Protect against accidental overwrite when the user typed a concrete path.
+    if output_path.exists() and path_input:
+        if not _prompt_yes_no(
+            f"{output_path} already exists. Overwrite? (y/n) [n]: ",
+            default=False,
+        ):
+            print("[*] Export cancelled")
+            return
     export_context = None
     if kind == "schedule" and choice == "ics":
         while True:
@@ -1204,12 +1282,23 @@ def _run_main_menu_iter(client, scraper, vpn) -> bool:
                 )
             stats = _compute_gpa_stats(grades)
             print("-" * 80)
-            print(
-                f"  Summary: {stats['courses']} courses  |  "
-                f"GPA {stats['gpa']:.3f}  |  "
-                f"Earned {stats['earned_credit']:.1f}/{stats['total_credit']:.1f} credits"
-                + (f"  |  Failed: {stats['failed']}" if stats["failed"] else "")
-            )
+            # Summary line: GPA with weighted-credit denominator made explicit.
+            parts = [
+                f"{stats['courses']} courses",
+                (
+                    f"GPA {stats['gpa']:.3f} (weighted over {stats['gpa_credit']:.1f} credits)"
+                    if stats["gpa_credit"] > 0
+                    else "GPA N/A"
+                ),
+                f"Earned {stats['earned_credit']:.1f}/{stats['total_credit']:.1f} credits",
+            ]
+            if stats["passed_non_gpa"]:
+                parts.append(f"Pass/合格: {stats['passed_non_gpa']}")
+            if stats["failed"]:
+                parts.append(f"Failed: {stats['failed']}")
+            if stats["unscored"]:
+                parts.append(f"Unscored/缓考: {stats['unscored']}")
+            print("  Summary: " + "  |  ".join(parts))
         else:
             print("No grades found")
         _maybe_export_records("grades", grades)
@@ -1230,7 +1319,12 @@ def _run_main_menu_iter(client, scraper, vpn) -> bool:
             for i, e in enumerate(exams, 1):
                 print(f"  {i}. {e['name']}")
                 print(f"     Time:     {e['time']}")
-                print(f"     Location: {e['location']} ({e['campus']})")
+                # Don't repeat campus name if it's already a prefix of the location.
+                loc = e["location"] or ""
+                campus = e["campus"] or ""
+                if campus and campus not in loc:
+                    loc = f"{loc} ({campus})"
+                print(f"     Location: {loc}")
                 print(f"     Seat:     {e['seat']}")
                 print(f"     Teacher:  {e['teacher']}")
                 print()
@@ -1253,7 +1347,20 @@ def _run_main_menu_iter(client, scraper, vpn) -> bool:
 
     elif choice == "8":
         valid = client.check_session()
-        print(f"Session valid: {valid}")
+        print(f"\n  JWXT session: {'valid' if valid else 'EXPIRED'}")
+        if valid:
+            info = client.get_student_info() or {}
+            if info.get("name"):
+                print(
+                    f"  Logged in as: {info['name']}"
+                    + (f" ({info.get('role')})" if info.get("role") else "")
+                )
+            if info.get("profile"):
+                print(f"  {info['profile']}")
+        if vpn is not None:
+            print(f"  WebVPN session: {'valid' if vpn.check_session() else 'EXPIRED'}")
+        else:
+            print("  WebVPN session: not initialised")
 
     elif choice == "0":
         scraper.close()

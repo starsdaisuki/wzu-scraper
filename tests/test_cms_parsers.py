@@ -86,3 +86,33 @@ def test_extract_article_content_handles_single_quoted_class() -> None:
     """联奕 JSP articles wrap the body with single-quoted class attributes."""
     html = "<div class='v_news_content'><p>单引号正文内容</p></div>"
     assert extract_article_content(html) == "单引号正文内容"
+
+
+def test_extract_article_content_decodes_entities_and_nbsp() -> None:
+    html = (
+        "<div class='v_news_content'>"
+        "<p>A&amp;B&nbsp;&nbsp;和&nbsp;C&quot;正文&quot;</p>"
+        "</div>"
+    )
+    assert extract_article_content(html) == 'A&B 和 C"正文"'
+
+
+def test_parse_style_a_decodes_entities_in_title() -> None:
+    html = (
+        '<ul><li><span class="w"><a href="info/1/2.htm">'
+        "大学生&amp;研究生数学建模&nbsp;通知</a></span>"
+        '<span class="time">2026-04-20</span></li></ul>'
+    )
+    articles = parse_style_a(html)
+    assert articles[0].title == "大学生&研究生数学建模 通知"
+
+
+def test_parse_style_jsp_decodes_entities_in_title() -> None:
+    html = (
+        '<ul><li><span class="w"><a href="xdetails.jsp?urltype=news.NewsContentUrl'
+        '&amp;wbtreeid=1276&amp;wbnewsid=1">'
+        "A&amp;B 新闻</a></span>"
+        '<span class="time">2026年04月24日</span></li></ul>'
+    )
+    articles = parse_style_jsp(html)
+    assert articles[0].title == "A&B 新闻"

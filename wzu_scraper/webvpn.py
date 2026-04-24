@@ -208,10 +208,30 @@ class WebVPNClient:
     # --- HTTP ---
 
     def get(self, url: str, **kwargs) -> httpx.Response:
-        return self._client.get(rewrite_url(url), **kwargs)
+        resp = self._client.get(rewrite_url(url), **kwargs)
+        self._warn_if_ipauth(resp)
+        return resp
 
     def post(self, url: str, **kwargs) -> httpx.Response:
-        return self._client.post(rewrite_url(url), **kwargs)
+        resp = self._client.post(rewrite_url(url), **kwargs)
+        self._warn_if_ipauth(resp)
+        return resp
+
+    @staticmethod
+    def _warn_if_ipauth(resp: httpx.Response) -> None:
+        """Log when WebVPN silently returns the ipauth stub.
+
+        A valid WebVPN session forwards the request and returns real content.
+        If the session expires mid-crawl the server responds 200 OK with the
+        tiny ``window.location.href='/system/resource/code/auth/ipauth.htm'``
+        redirect stub instead — the caller would otherwise just see "empty
+        list" and have no idea why.  Emitting a warning at least surfaces it.
+        """
+        if resp.status_code == 200 and len(resp.text) < 500 and "ipauth" in resp.text:
+            logger.warning(
+                "WebVPN returned ipauth redirect — session may be expired",
+                extra={"url": str(resp.url)},
+            )
 
     # --- housekeeping ---
 
