@@ -250,8 +250,10 @@ class CMSScraper:
                     self._articles[key] = art
                     new_count += 1
 
-            # Crawl remaining pages (page/1.htm is newest after the default listing)
-            pages = range(1, total_pages + 1)
+            # Crawl remaining pages. 博达站群 pagination is REVERSE: the
+            # default .htm shows newest; page/N.htm (highest N) is next newest,
+            # page/1.htm is the oldest batch. So walk from total_pages down.
+            pages = range(total_pages, 0, -1)
             if max_pages > 0:
                 pages = list(pages)[:max_pages]
 

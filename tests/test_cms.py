@@ -8,11 +8,10 @@ from wzu_scraper.cms import CMSScraper, SITES
 
 
 def test_crawl_max_pages_visits_newest_pages_first(tmp_path, monkeypatch):
-    """max_pages should visit page 1,2,3 (newest) not total_pages,...,N (oldest).
+    """max_pages should visit the newest numbered pages.
 
-    博达站群分页: 默认页 .htm = 最新; page/1.htm 次新; page/N.htm 最老.
-    Regression test for a bug where max_pages sliced from the end of the
-    descending range, so users asking for "last 5 pages" got the oldest 5.
+    博达站群分页: 默认页 .htm = 最新; page/N.htm (largest N) = 次新,
+    走到 page/1.htm 才是最老一批. 所以 "last 5 pages" 是 [N, N-1, ..., N-4].
     """
     monkeypatch.setattr(CMSScraper, "_load_all_dbs", lambda self: None)
     monkeypatch.setattr(CMSScraper, "_save_db", lambda self, site_key: None)
@@ -44,6 +43,6 @@ def test_crawl_max_pages_visits_newest_pages_first(tmp_path, monkeypatch):
     paginated = [p for p in visited if f"/{page_name}/" in p]
     page_numbers = [int(p.rsplit("/", 1)[1].removesuffix(".htm")) for p in paginated]
 
-    assert page_numbers == [1, 2, 3, 4, 5], (
-        f"Expected newest pages [1,2,3,4,5], got {page_numbers}"
+    assert page_numbers == [20, 19, 18, 17, 16], (
+        f"Expected newest pages [20,19,18,17,16], got {page_numbers}"
     )
